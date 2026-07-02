@@ -4921,7 +4921,7 @@ void SyncSh2And68k(){
     //SH2Core->AddCycle(MSH2, 50);
     //SH2Core->AddCycle(SSH2, 50);
 
-    if (mem_access_counter++ >= 128) {
+    if (mem_access_counter++ >= 512) {
 #if defined(ARCH_IS_LINUX)
       pthread_mutex_lock(&sync_mutex);
       pthread_cond_signal(&sync_cnd);
@@ -5669,53 +5669,15 @@ void ScspAsynMainRealtime(void * p) {
         //tm.tv_sec = 0;
         //tm.tv_nsec = sleeptime;
 
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &tm);
-        ts.tv_nsec = tm.tv_nsec + sleeptime;
-        if (tm.tv_nsec > ts.tv_nsec) {
-          tm.tv_sec += 1;
-        }
-        tm.tv_nsec = ts.tv_nsec;
-
-        pthread_mutex_lock(&sync_mutex);
-        int rtn = pthread_cond_timedwait(&sync_cnd, &sync_mutex, &tm);
-        if (rtn == 0) {
-          for (i = 0; i < samplecnt; i += step) {
-            MM68KExec(step);
-            m68kcycle += base_clock;
-          }
-          frame += samplecnt;
-          if (use_new_scsp) {
-            new_scsp_exec((samplecnt << 1));
-          }
-          else {
-            scsp_update_timer(1);
-          }
-        }
-        pthread_mutex_unlock(&sync_mutex);
+        struct timespec req;
+        req.tv_sec = sleeptime / 1000000000L;
+        req.tv_nsec = sleeptime % 1000000000L;
+        nanosleep(&req, NULL);
 #elif defined(ARCH_IS_LINUX)    
-        time((time_t *)&tm);
-        long n = tm.tv_nsec;
-        tm.tv_nsec += sleeptime;
-        if( n > tm.tv_nsec){
-          tm.tv_sec += 1;
-        }
-        pthread_mutex_lock(&sync_mutex);
-        int rtn = pthread_cond_timedwait(&sync_cnd,&sync_mutex,(const struct timespec * restrict)ctime((time_t *)&tm));
-        if(rtn == 0){
-          for (i = 0; i < samplecnt; i += step) {
-            MM68KExec(step);
-            m68kcycle += base_clock;
-          }
-          frame += samplecnt;
-          if (use_new_scsp) {
-            new_scsp_exec((samplecnt << 1));
-          }
-          else {
-            scsp_update_timer(1);
-          }
-        }
-        pthread_mutex_unlock(&sync_mutex);
+        struct timespec req;
+        req.tv_sec = sleeptime / 1000000000L;
+        req.tv_nsec = sleeptime % 1000000000L;
+        nanosleep(&req, NULL);
 #else
         if (sleeptime > 10000) YabThreadUSleep(0);
         if (sh2_read_req != 0) {

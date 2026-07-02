@@ -1309,7 +1309,7 @@ static void FASTCALL Vdp2DrawRotationFP(vdp2draw_struct *info, vdp2rotationparam
          if (info->linescreen > 1)
          {
             lineColorAddr = (T1ReadWord(ram, lineAddr) & 0x780) | p->linescreen;
-            lineColor = Vdp2ColorRamGetColor(lineColorAddr, (int)color_ram);
+            lineColor = Vdp2ColorRamGetColorSoft(lineColorAddr, color_ram);
             lineAddr += lineInc;
             TitanPutLineHLine(info->linescreen, j, COLSAT2YAB32(0x3F, lineColor));
          }
@@ -1518,7 +1518,7 @@ static void Vdp2DrawLineScreen(void)
       for (i = 0; i < vdp2height; i++)
       {
          color = T1ReadWord(Vdp2Ram, scrAddr) & 0x7FF;
-         dot = Vdp2ColorRamGetColor(color, (int)Vdp2ColorRam);
+         dot = Vdp2ColorRamGetColorSoft(color, Vdp2ColorRam);
          scrAddr += 2;
 
          TitanPutLineHLine(1, i, COLSAT2YAB32(alpha, dot));
@@ -1528,7 +1528,7 @@ static void Vdp2DrawLineScreen(void)
    {
       /* single color, implemented but not tested... */
       color = T1ReadWord(Vdp2Ram, scrAddr) & 0x7FF;
-      dot = Vdp2ColorRamGetColor(color, (int)Vdp2ColorRam);
+      dot = Vdp2ColorRamGetColorSoft(color, Vdp2ColorRam);
       for (i = 0; i < vdp2height; i++)
          TitanPutLineHLine(1, i, COLSAT2YAB32(alpha, dot));
    }
@@ -3717,7 +3717,7 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
                      continue;
                   }
 
-                  dot = Vdp2ColorRamGetColor(vdp1coloroffset + pixel,(int)color_ram);
+                  dot = Vdp2ColorRamGetColorSoft(vdp1coloroffset + pixel,color_ram);
 
                   if (TestBothWindow(vdp2_regs->WCTLD >> 8, colorcalcwindow, i, i2) && (vdp2_regs->CCCTL & 0x40))
                   {
@@ -3806,7 +3806,7 @@ void VidsoftDrawSprite(Vdp2 * vdp2_regs, u8 * spr_window_mask, u8* vdp1_front_fr
                      continue;
                   }
 
-                  dot = Vdp2ColorRamGetColor(vdp1coloroffset + pixel, (int)color_ram);
+                  dot = Vdp2ColorRamGetColorSoft(vdp1coloroffset + pixel, color_ram);
 
                   if (TestBothWindow(vdp2_regs->WCTLD >> 8, colorcalcwindow, i, i2) && (vdp2_regs->CCCTL & 0x40))
                   {

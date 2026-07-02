@@ -333,8 +333,12 @@ u8 cache_memory_read_b(cache_enty * ca, u32 addr){
       lruway = select_way_to_replace(ca->lru[entry]);
       update_lru(lruway, &ca->lru[entry]);
 		ca->way[lruway][entry].tag = tagaddr;
-		for (i = 0; i < 16; i++){
-			ca->way[lruway][entry].data[i] = ReadByteList[(addr >> 16) & 0xFFF]((addr & 0xFFFFFFF0) + i);
+		for (i = 0; i < 16; i += 4){
+			u32 val = ReadLongList[(addr >> 16) & 0xFFF]((addr & 0xFFFFFFF0) + i);
+			ca->way[lruway][entry].data[i] = (val >> 24) & 0xFF;
+			ca->way[lruway][entry].data[i + 1] = (val >> 16) & 0xFF;
+			ca->way[lruway][entry].data[i + 2] = (val >> 8) & 0xFF;
+			ca->way[lruway][entry].data[i + 3] = val & 0xFF;
 		}
      
       ca->way[lruway][entry].v = 1; //becomes valid
@@ -386,8 +390,12 @@ u16 cache_memory_read_w(cache_enty * ca, u32 addr){
 		lruway = select_way_to_replace(ca->lru[entry]);
       update_lru(lruway, &ca->lru[entry]);
 		ca->way[lruway][entry].tag = tagaddr;
-		for (i = 0; i < 16; i++){
-			ca->way[lruway][entry].data[i] = ReadByteList[(addr >> 16) & 0xFFF]((addr & 0xFFFFFFF0) + i);
+		for (i = 0; i < 16; i += 4){
+			u32 val = ReadLongList[(addr >> 16) & 0xFFF]((addr & 0xFFFFFFF0) + i);
+			ca->way[lruway][entry].data[i] = (val >> 24) & 0xFF;
+			ca->way[lruway][entry].data[i + 1] = (val >> 16) & 0xFF;
+			ca->way[lruway][entry].data[i + 2] = (val >> 8) & 0xFF;
+			ca->way[lruway][entry].data[i + 3] = val & 0xFF;
 		}
       ca->way[lruway][entry].v = 1; //becomes valid
 		return ((u16)(ca->way[lruway][entry].data[addr&LINE_MASK]) << 8) | ca->way[lruway][entry].data[(addr&LINE_MASK) + 1];
@@ -449,8 +457,12 @@ u32 cache_memory_read_l(cache_enty * ca, u32 addr){
 		lruway = select_way_to_replace(ca->lru[entry]);
       update_lru(lruway, &ca->lru[entry]);
 		ca->way[lruway][entry].tag = tagaddr;
-		for (i = 0; i < 16; i++){
-			ca->way[lruway][entry].data[i] = ReadByteList[(addr >> 16) & 0xFFF]((addr & 0xFFFFFFF0) + i);
+		for (i = 0; i < 16; i += 4){
+			u32 val = ReadLongList[(addr >> 16) & 0xFFF]((addr & 0xFFFFFFF0) + i);
+			ca->way[lruway][entry].data[i] = (val >> 24) & 0xFF;
+			ca->way[lruway][entry].data[i + 1] = (val >> 16) & 0xFF;
+			ca->way[lruway][entry].data[i + 2] = (val >> 8) & 0xFF;
+			ca->way[lruway][entry].data[i + 3] = val & 0xFF;
 		}
       ca->way[lruway][entry].v = 1; //becomes valid
 		return ((u32)(ca->way[lruway][entry].data[addr&LINE_MASK]) << 24) |

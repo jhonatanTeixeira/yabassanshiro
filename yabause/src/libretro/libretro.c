@@ -661,7 +661,7 @@ void retro_get_system_info(struct retro_system_info *info)
 #ifndef GIT_VERSION
 #define GIT_VERSION ""
 #endif
-   info->library_version  = "v" VERSION GIT_VERSION;
+    info->library_version  = "v" VERSION GIT_VERSION "-perf-v7";
    info->need_fullpath    = true;
    info->block_extract    = true;
    info->valid_extensions = "cue|iso|mds|ccd|chd";
@@ -1002,7 +1002,7 @@ bool retro_load_game_common()
    yinit.use_new_scsp              = 1;
    yinit.scsp_sync_count_per_frame = 1;
    yinit.extend_backup             = 1;
-   yinit.scsp_main_mode            = 0;
+   yinit.scsp_main_mode            = 1;
    yinit.videoformattype           = VIDEOFORMATTYPE_NTSC;
    yinit.video_filter_type         = 0;
 
@@ -1388,13 +1388,12 @@ void retro_run(void)
          PERCore->Init();
    }
 
-   if (environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fastforward) && fastforward)
-   {
-      if (g_frame_skip == 1 && !fastforward)
-         EnableAutoFrameSkip();
-      else
-         DisableAutoFrameSkip();
-   }
+    fastforward = false;
+    environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fastforward);
+    if (g_frame_skip == 1 && !fastforward)
+       EnableAutoFrameSkip();
+    else
+       DisableAutoFrameSkip();
 
    //YabauseExec(); runs from handle events
    if(PERCore)

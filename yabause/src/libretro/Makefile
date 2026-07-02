@@ -93,7 +93,7 @@ else ifeq ($(platform), arm64)
 	fpic := -fPIC
 	SHARED := -shared -Wl,--no-undefined -Wl,--version-script=link.T
 	LDFLAGS += -lpthread
-	FLAGS += -DAARCH64
+	FLAGS += -DAARCH64 -march=armv8-a+crc+fp+simd -mcpu=cortex-a35 -mtune=cortex-a35 -ffast-math -ftree-vectorize -funroll-loops
 	ARCH_IS_LINUX = 1
 	HAVE_SSE = 0
 	USE_AARCH64_DRC = 1
@@ -466,13 +466,17 @@ endif
 
 OBJECTS += $(OBJECTS_C) $(OBJECTS_CXX) $(OBJECTS_S)
 
+ifeq ($(NO_LINK_GL), 1)
+	SHARED := -shared -Wl,--version-script=link.T
+endif
+
 LDFLAGS += $(fpic) $(SHARED)
 FLAGS += $(fpic)
 
 INCFLAGS := $(foreach dir,$(INCLUDE_DIRS),-I$(dir))
 
 WARNINGS :=
-FLAGS += $(INCFLAGS) $(ENDIANNESS_DEFINES) $(WARNINGS)
+FLAGS += $(INCFLAGS) $(ENDIANNESS_DEFINES) $(WARNINGS) -DDONT_PROFILE
 
 CXXFLAGS += $(FLAGS) -std=gnu++11
 CFLAGS += $(FLAGS) -std=gnu11

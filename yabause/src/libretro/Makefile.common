@@ -57,7 +57,9 @@ ifeq ($(FORCE_GLES), 1)
 	ifeq ($(USE_GLES_FRAMEWORK), 1)
 		LDFLAGS += -framework OpenGLES
 	else
-		LDFLAGS += -lGLESv2
+		ifneq ($(NO_LINK_GL), 1)
+			LDFLAGS += -lGLESv2
+		endif
 	endif
 	ifeq ($(FORCE_GLEW), 0)
 		FLAGS += -DHAVE_OPENGLES -DHAVE_OPENGLES3
@@ -69,7 +71,9 @@ else
 	else ifeq ($(ARCH_IS_MACOSX), 1)
 		LDFLAGS += -framework OpenGL
 	else
-		LDFLAGS += -lGL
+		ifneq ($(NO_LINK_GL), 1)
+			LDFLAGS += -lGL
+		endif
 	endif
 endif
 
