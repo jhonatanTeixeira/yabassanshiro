@@ -4922,14 +4922,20 @@ void SyncSh2And68k(){
     //SH2Core->AddCycle(SSH2, 50);
 
     if (mem_access_counter++ >= 512) {
+      /* Only ScspAsynMainCpuTime (main_mode==0) waits on sync_cnd; the
+         realtime mode (main_mode==1, the default) paces itself off the
+         wall clock and never consumes this signal, so skip the mutex
+         lock/condvar signal entirely in that case. */
+      if (g_scsp_main_mode == 0) {
 #if defined(ARCH_IS_LINUX)
-      pthread_mutex_lock(&sync_mutex);
-      pthread_cond_signal(&sync_cnd);
-      pthread_mutex_unlock(&sync_mutex);
+        pthread_mutex_lock(&sync_mutex);
+        pthread_cond_signal(&sync_cnd);
+        pthread_mutex_unlock(&sync_mutex);
 #else
-      sh2_read_req++;
-      YabThreadYield();
-#endif  
+        sh2_read_req++;
+        YabThreadYield();
+#endif
+      }
       mem_access_counter = 0;
     }
   }

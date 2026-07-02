@@ -1271,7 +1271,18 @@ void vdp2VBlankOUT(void) {
          framestoskip = 1;
       }else if ((onesecondticks+diffticks) < ((yabsys.OneFrameTime * (u64)framecount) - (yabsys.OneFrameTime / 2)))
       {
-         // Check to see if we need to limit speed at all
+         // Check to see if we need to limit speed at all.
+         // Sleep for the bulk of the remaining wait instead of busy-spinning
+         // on YabauseGetTicks() every iteration (was costing ~30% of a CPU
+         // core just polling the clock); a short final spin (<1ms) keeps the
+         // same precision the busy-wait had.
+         s64 remaining_ticks = (s64)(yabsys.OneFrameTime * (u64)framecount) - (s64)(onesecondticks + diffticks);
+         if (remaining_ticks > 0)
+         {
+            s64 sleep_us = remaining_ticks * 1000000LL / (s64)yabsys.tickfreq;
+            if (sleep_us > 1000)
+               YabThreadUSleep((unsigned int)(sleep_us - 1000));
+         }
          for (;;)
          {
             curticks = YabauseGetTicks();

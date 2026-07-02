@@ -18,6 +18,7 @@ ARCH_IS_WINDOWS = 0
 FORCE_GLEW = 0
 HAVE_SYS_PARAM_H = 1
 HAVE_FSEEKO = 0
+USE_LTO = 1
 
 ifeq ($(platform),)
 	platform = unix
@@ -461,6 +462,13 @@ else
 	ifneq (,$(findstring clang,$(shell $(CC) --version 2>/dev/null)))
 	else
 		FLAGS += -fno-tree-tail-merge #workaround segfault on N2 and possibly other ARM boards
+	endif
+	ifeq ($(USE_LTO), 1)
+		# Lets the compiler inline hot cross-file calls (e.g. ScspDspExec from
+		# scsp.c, FetchHWram/MappedMemoryRead* from memory.c) that -O3 alone
+		# can't see across translation units. No behavior change.
+		FLAGS += -flto=auto -ffat-lto-objects
+		LDFLAGS += -flto=auto
 	endif
 endif
 
