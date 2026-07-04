@@ -489,7 +489,9 @@ else
 	endif
 endif
 
-OBJECTS += $(OBJECTS_C) $(OBJECTS_CXX) $(OBJECTS_S)
+OBJECTS += $(OBJECTS_C) $(OBJECTS_CXX) $(OBJECTS_S) $(OBJECTS_ASM)
+
+NASM ?= nasm
 
 ifeq ($(NO_LINK_GL), 1)
 	SHARED := -shared -Wl,--version-script=link.T
@@ -532,6 +534,9 @@ endif
 
 %.s.o: %.s
 	$(CC_AS) $(CFLAGS) -c $^ -o $@
+
+%.asm.o: %.asm
+	$(NASM) -f elf64 -o $@ $<
 
 %.cpp.o: %.cpp
 	$(CXX) -c -o $@ $< $(CXXFLAGS)

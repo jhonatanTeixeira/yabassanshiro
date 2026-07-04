@@ -88,6 +88,7 @@ INCLUDE_DIRS := $(CORE_DIR) \
 	$(ZLIB_DIR)
 
 SOURCES_S :=
+SOURCES_ASM :=
 
 SOURCES_C := $(SOURCE_DIR)/osdcore.c \
 	$(SOURCE_DIR)/bios.c \
@@ -206,7 +207,10 @@ ifeq ($(DYNAREC_DEVMIYAX), 1)
 	else ifeq ($(USE_AARCH64_DRC), 1)
 		SOURCES_S += $(SOURCE_DIR)/sh2_dynarec_devmiyax/dynalib_arm64.s
 	else ifeq ($(USE_X86_DRC), 1)
-		$(OBJECTS_S) += $(SOURCE_DIR)/sh2_dynarec_devmiyax/dynalib.obj
+		# NASM source (Linux SysV ABI port of devMiyax's Windows x64 backend),
+		# not the dead 32-bit Windows dynalib.obj -- assembled via the
+		# %.asm.o rule below, not the GAS-based %.s.o rule.
+		SOURCES_ASM += $(SOURCE_DIR)/sh2_dynarec_devmiyax/dynalib_x86_64_sysv.asm
 	endif
 	SOURCES_CXX += $(SOURCE_DIR)/sh2_dynarec_devmiyax/DynarecSh2CInterface.cpp \
 		$(SOURCE_DIR)/sh2_dynarec_devmiyax/DynarecSh2.cpp
@@ -257,4 +261,5 @@ C68KEXEC_OBJECT := $(C68KEXEC_SOURCE:.c=.c.o)
 OBJECTS_C += $(SOURCES_C:.c=.c.o)
 OBJECTS_CXX += $(SOURCES_CXX:.cpp=.cpp.o)
 OBJECTS_S += $(SOURCES_S:.s=.s.o)
+OBJECTS_ASM += $(SOURCES_ASM:.asm=.asm.o)
 

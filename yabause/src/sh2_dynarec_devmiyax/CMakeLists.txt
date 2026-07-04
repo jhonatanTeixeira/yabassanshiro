@@ -18,18 +18,20 @@ set(SOURCES
   ../sh2d.c
 )
 
-if (MSVC)    
+if (MSVC)
   add_definitions(-DHAVE_C99_VARIADIC_MACROS)
   link_directories(${CMAKE_CURRENT_SOURCE_DIR})
   set (LIBRARIES  ${CMAKE_CURRENT_SOURCE_DIR}/dynalib.obj )
   set (CMAKE_EXE_LINKER_FLAGS /SAFESEH:NO )
 else (MSVC)
- set (LIBRARIES  ${CMAKE_CURRENT_SOURCE_DIR}/dynalib.obj )
+  # Linux x86_64: build the SysV-ABI port of the dynarec (dynalib_x86_64_sysv.asm)
+  # via NASM. The old dynalib.obj is a dead 32-bit Windows COFF stub and was
+  # never linkable here.
+  enable_language(ASM_NASM)
+  set(CMAKE_ASM_NASM_OBJECT_FORMAT elf64)
+  set(SOURCES ${SOURCES} dynalib_x86_64_sysv.asm)
+  set (LIBRARIES "")
 
-	#enable_language(ASM-ATT)
-  #add_definitions(-DAARCH64)
-  #set(SOURCES ${SOURCES} dynalib_arm64.s )
-  set(CMAKE_ASM-ATT_FLAGS  "${CMAKE_ASM-ATT_FLAGS}")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g --std=gnu++11 -DGTEST --coverage -fprofile-arcs -ftest-coverage")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -g -DGTEST --coverage -fprofile-arcs -ftest-coverage")
 endif (MSVC)

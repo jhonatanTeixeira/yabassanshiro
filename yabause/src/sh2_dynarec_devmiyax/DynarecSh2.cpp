@@ -359,7 +359,7 @@ void DumpInstX( int i, u32 pc, u16 op  )
 #define NORMAL_CLOCK_OFFSET 6
 #define NORMAL_CLOCK_OFFSET_DEBUG 3
 #elif defined(AARCH64)
-#define PROLOGSIZE		     (11*4)    
+#define PROLOGSIZE		     (11*4)
 #define SEPERATORSIZE_NORMAL (2*4)
 #define NORMAL_CLOCK_OFFSET 4
 #define NORMAL_CLOCK_OFFSET_DEBUG 4
@@ -371,6 +371,32 @@ void DumpInstX( int i, u32 pc, u16 op  )
 #define SEPERATORSIZE_DELAYD_DEBUG (20*4)
 #define EPILOGSIZE		      (10*4)
 #define DELAYJUMPSIZE	     (11*4)
+#elif defined(__x86_64__)
+// Linux SysV x86_64 backend (dynalib_x86_64_sysv.asm), adapted from devMiyax's
+// original Windows x64 build of the same NASM source. These byte counts were
+// measured directly off the actual NASM/ELF64 assembled output (objdump label
+// deltas), not carried over from the Windows constants above: NASM chooses
+// different instruction encodings than the original Windows toolchain, and
+// several of the historical per-opcode _size values upstream (Windows build)
+// didn't match its own assembled bytes either (e.g. DIV1 claimed 432, real
+// 35) -- so nothing here is trusted without being re-derived from real bytes.
+#define PROLOGSIZE		     42
+#define SEPERATORSIZE_NORMAL 11
+#define NORMAL_CLOCK_OFFSET 10
+#define NORMAL_CLOCK_OFFSET_DEBUG 5
+#define SEPERATORSIZE_DEBUG  42
+#define SEPERATORSIZE_DELAY_SLOT  43
+#define SEPERATORSIZE_DELAY_AFTER  24
+// Both of these patch a byte inside seperator_delay_after (the block that's
+// *always* appended after the delay-slot instruction, in both debug and
+// non-debug builds -- see EmmitCode's hardcoded seperator_delay_after memcpy),
+// not inside seperator_delay_slot/seperator_d_delay as the naming suggests.
+// Verified against the real assembled clock-immediate byte position.
+#define DALAY_CLOCK_OFFSET 10
+#define DALAY_CLOCK_OFFSET_DEBUG 10
+#define SEPERATORSIZE_DELAYD_DEBUG 59
+#define EPILOGSIZE		      13
+#define DELAYJUMPSIZE	     29
 #else // ARMv7
 #define PROLOGSIZE		     16    
 #define SEPERATORSIZE_NORMAL 8
@@ -870,15 +896,18 @@ void CompileBlocks::opcodePass(x86op_desc *op, u16 opcode, u8 *ptr)
   if (*(op->imm) != 0xFF)
     *(ptr + *(op->imm)) = (u8)(opcode & 0xff);
 
-#if _WINDOWS
+#if _WINDOWS || defined(__x86_64__)
+  // x86_64 (both Windows and this Linux SysV port) patches BRA/BSR's 12-bit
+  // displacement as a single 16-bit immediate (e.g. "mov ax,0" in the BRA/BSR
+  // templates) -- the ARM32 two-byte-split write below does not apply here.
   if (*(op->off3) != 0xFF)
     *(u16*)(ptr + *(op->off3)) = (u16)(opcode & 0xfff);
-#else  
+#else
   if (*(op->off3) != 0xFF) {
     *(ptr + *(op->off3)) = (u8)((opcode >> 8) & 0x0f);
     *(ptr + *(op->off3) + 4) = (u8)(opcode & 0xff);
 }
-#endif  
+#endif
 
 #endif
 }
@@ -1500,16 +1529,17 @@ inline int DynarecSh2::Execute(){
     }
   }
     
-#if 0
+#define TRACE_INTERP_PC 1
+#if defined(TRACE_INTERP_PC)
     static FILE * fp = NULL;
-    char fname[64];
-    sprintf(fname,"/mnt/sdcard/yabause/intlog.txt");
-    if( fp == NULL ) {
-        fp = fopen(fname, "w");
+    static u64 fp_count = 0;
+    if( fp == NULL && !is_slave_) {
+        fp = fopen("/tmp/drc_pc_trace.log", "w");
     }
-    if(fp){
-        fprintf(fp,"\n---dynaExecute %08X----\n", GET_PC());
-        fflush(fp);
+    if(fp && !is_slave_ && fp_count < 3000000){
+        fprintf(fp,"%08X\n", GET_PC());
+        fp_count++;
+        if ((fp_count % 4096) == 0) fflush(fp);
     }
 #endif
 //  if(yabsys.frame_count == 7){
