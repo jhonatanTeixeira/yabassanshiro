@@ -66,7 +66,20 @@ static int g_sh2coretype = 3;
 static int g_sh2coretype = SH2CORE_INTERPRETER;
 #endif
 
+#ifdef YAB_SYNC_SCSP
+/* Cycle-driven SCSP/M68K build: audio delivery now happens on the main
+ * thread (see scsp.c ScspExec), so vdp2VBlankOUT's own wall-clock wait
+ * fights RetroArch's audio_sync backpressure for the same real-time
+ * budget with no buffer between them, causing audible crackle -- confirmed
+ * by live A/B testing. Default frameskip off so audio_sync/vsync are the
+ * only real-time governor, matching standard libretro core behavior.
+ * Still user-togglable as a fallback for frontends without reliable
+ * audio_sync pacing.
+ */
+static int g_frame_skip = 0;
+#else
 static int g_frame_skip = 1;
+#endif
 static int g_rbg_resolution_mode = RBG_RES_ORIGINAL;
 static int g_rbg_use_compute_shader = 0;
 static int addon_cart_type = CART_DRAM32MBIT;
@@ -98,7 +111,11 @@ void retro_set_environment(retro_environment_t cb)
 {
    static const struct retro_variable vars[] = {
       { "yabasanshiro_force_hle_bios", "Force HLE BIOS (restart); disabled|enabled" },
+#ifdef YAB_SYNC_SCSP
+      { "yabasanshiro_frameskip", "Auto-frameskip; disabled|enabled" },
+#else
       { "yabasanshiro_frameskip", "Auto-frameskip; enabled|disabled" },
+#endif
       { "yabasanshiro_addon_cart", "Addon Cartridge (restart); 4M_extended_ram|1M_extended_ram" },
       { "yabasanshiro_system_language", "System Language (restart); english|deutsch|french|spanish|italian|japanese" },
       { "yabasanshiro_multitap_port1", "6Player Adaptor on Port 1; disabled|enabled" },

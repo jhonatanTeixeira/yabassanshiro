@@ -19,6 +19,7 @@ FORCE_GLEW = 0
 HAVE_SYS_PARAM_H = 1
 HAVE_FSEEKO = 0
 USE_LTO = 1
+YAB_SYNC_SCSP = 0
 
 ifeq ($(platform),)
 	platform = unix
@@ -423,6 +424,12 @@ ifneq (,$(or $(findstring webos,$(CROSS_COMPILE)),$(findstring starfish,$(CROSS_
 endif
 
 include Makefile.common
+
+# Cycle-driven SCSP/M68K sync path (single-thread, no ScspAsynMainRealtime
+# thread). Off by default: production builds are unaffected.
+ifeq ($(YAB_SYNC_SCSP), 1)
+	FLAGS += -DYAB_SYNC_SCSP
+endif
 
 ifeq ($(__USE_OPENGL_DEBUG__),1)
 	FLAGS += -D__USE_OPENGL_DEBUG__
