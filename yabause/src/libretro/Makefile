@@ -20,6 +20,7 @@ HAVE_SYS_PARAM_H = 1
 HAVE_FSEEKO = 0
 USE_LTO = 1
 YAB_SYNC_SCSP = 0
+YAB_SCSP_WORKER = 0
 
 ifeq ($(platform),)
 	platform = unix
@@ -429,6 +430,15 @@ include Makefile.common
 # thread). Off by default: production builds are unaffected.
 ifeq ($(YAB_SYNC_SCSP), 1)
 	FLAGS += -DYAB_SYNC_SCSP
+endif
+
+# Dispatches SCSP/M68K work (register access + per-deciline cycle stepping)
+# to a dedicated worker thread via sound_worker.cpp's post/call primitives,
+# instead of running it inline on the main thread. Requires YAB_SYNC_SCSP=1
+# (it replaces that mode's inline execution, keeping its call-site structure
+# in yabause.c untouched). Off by default.
+ifeq ($(YAB_SCSP_WORKER), 1)
+	FLAGS += -DYAB_SCSP_WORKER
 endif
 
 ifeq ($(__USE_OPENGL_DEBUG__),1)

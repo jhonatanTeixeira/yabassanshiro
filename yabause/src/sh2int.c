@@ -3148,6 +3148,11 @@ FASTCALL void SH2DebugInterpreterExec(SH2_struct *context, u32 cycles)
 
 //////////////////////////////////////////////////////////////////////////////
 
+#if defined(TRACE_INTERP_PC)
+static FILE * s_interp_trace_fp = NULL;
+static u64 s_interp_trace_count = 0;
+#endif
+
 FASTCALL void SH2InterpreterExec(SH2_struct *context, u32 cycles)
 {
   int target_cycle = context->cycles + cycles - context->pre_cycle;
@@ -3169,6 +3174,15 @@ FASTCALL void SH2InterpreterExec(SH2_struct *context, u32 cycles)
       else
 #endif
       context->instruction = fetchlist[(context->regs.PC >> 20) & 0x0FF](context->regs.PC);
+
+#if defined(TRACE_INTERP_PC)
+      if (context == MSH2 && s_interp_trace_count < 3000000) {
+        if (s_interp_trace_fp == NULL) s_interp_trace_fp = fopen("/tmp/interp_pc_trace.log", "w");
+        if (s_interp_trace_fp) fprintf(s_interp_trace_fp, "%08X\n", context->regs.PC);
+        s_interp_trace_count++;
+        if ((s_interp_trace_count % 4096) == 0 && s_interp_trace_fp) fflush(s_interp_trace_fp);
+      }
+#endif
 
       // Execute it
       opcodes[context->instruction](context);

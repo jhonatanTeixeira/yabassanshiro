@@ -119,6 +119,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 #include "scsp.h"
 #include "scspdsp.h"
 #include "threads.h"
+#include "sound_worker.h"
 
 #ifndef max
 #define max(a,b) (((a) > (b)) ? (a) : (b))
@@ -4129,8 +4130,8 @@ scsp_midi_out_read (void)
 ////////////////////////////////////////////////////////////////
 // Access
 
-void FASTCALL
-scsp_w_b (u32 a, u8 d)
+static void FASTCALL
+scsp_w_b_real (u32 a, u8 d)
 {
   a &= 0xFFF;
 
@@ -4238,8 +4239,8 @@ scsp_w_b (u32 a, u8 d)
 
 ////////////////////////////////////////////////////////////////
 
-void FASTCALL
-scsp_w_w (u32 a, u16 d)
+static void FASTCALL
+scsp_w_w_real (u32 a, u16 d)
 {
   if (a & 1)
     {
@@ -4322,8 +4323,8 @@ scsp_w_w (u32 a, u16 d)
 
 ////////////////////////////////////////////////////////////////
 
-void FASTCALL
-scsp_w_d (u32 a, u32 d)
+static void FASTCALL
+scsp_w_d_real (u32 a, u32 d)
 {
   if (a & 3)
     {
@@ -4374,8 +4375,8 @@ scsp_w_d (u32 a, u32 d)
 
 ////////////////////////////////////////////////////////////////
 
-u8 FASTCALL
-scsp_r_b (u32 a)
+static u8 FASTCALL
+scsp_r_b_real (u32 a)
 {
   a &= 0xFFF;
 
@@ -4412,8 +4413,8 @@ scsp_r_b (u32 a)
 
 ////////////////////////////////////////////////////////////////
 
-u16 FASTCALL
-scsp_r_w (u32 a)
+static u16 FASTCALL
+scsp_r_w_real (u32 a)
 {
   if (a & 1)
     {
@@ -4504,8 +4505,8 @@ scsp_r_w (u32 a)
 
 ////////////////////////////////////////////////////////////////
 
-u32 FASTCALL
-scsp_r_d (u32 a)
+static u32 FASTCALL
+scsp_r_d_real (u32 a)
 {
   if (a & 3)
     {
@@ -4538,6 +4539,92 @@ scsp_r_d (u32 a)
 
   return 0;
 }
+
+////////////////////////////////////////////////////////////////
+// Public register accessors. Under YAB_SCSP_WORKER these dispatch to the
+// sound worker thread (see sound_worker.h) instead of running inline, so
+// that SCSP register state is only ever touched from one thread. Writes are
+// fire-and-forget; reads block for the value. When called from the worker
+// thread itself (e.g. the M68K core touching its own SCSP registers), the
+// dispatcher runs the _real implementation in-place with no queueing.
+
+#if defined(YAB_SCSP_WORKER)
+
+void FASTCALL
+scsp_w_b (u32 a, u8 d)
+{
+  SoundWorkerPostWriteByte(a, d, scsp_w_b_real);
+}
+
+void FASTCALL
+scsp_w_w (u32 a, u16 d)
+{
+  SoundWorkerPostWriteWord(a, d, scsp_w_w_real);
+}
+
+void FASTCALL
+scsp_w_d (u32 a, u32 d)
+{
+  SoundWorkerPostWriteLong(a, d, scsp_w_d_real);
+}
+
+u8 FASTCALL
+scsp_r_b (u32 a)
+{
+  return SoundWorkerCallReadByte(a, scsp_r_b_real);
+}
+
+u16 FASTCALL
+scsp_r_w (u32 a)
+{
+  return SoundWorkerCallReadWord(a, scsp_r_w_real);
+}
+
+u32 FASTCALL
+scsp_r_d (u32 a)
+{
+  return SoundWorkerCallReadLong(a, scsp_r_d_real);
+}
+
+#else
+
+void FASTCALL
+scsp_w_b (u32 a, u8 d)
+{
+  scsp_w_b_real(a, d);
+}
+
+void FASTCALL
+scsp_w_w (u32 a, u16 d)
+{
+  scsp_w_w_real(a, d);
+}
+
+void FASTCALL
+scsp_w_d (u32 a, u32 d)
+{
+  scsp_w_d_real(a, d);
+}
+
+u8 FASTCALL
+scsp_r_b (u32 a)
+{
+  return scsp_r_b_real(a);
+}
+
+u16 FASTCALL
+scsp_r_w (u32 a)
+{
+  return scsp_r_w_real(a);
+}
+
+u32 FASTCALL
+scsp_r_d (u32 a)
+{
+  return scsp_r_d_real(a);
+}
+
+#endif /* YAB_SCSP_WORKER */
 
 ////////////////////////////////////////////////////////////////
 // Interface
@@ -5118,6 +5205,11 @@ ScspInit (int coreid, int scsp_sync_count_per_frame, int scsp_main_mode )
   }
 
   g_scsp_main_mode = scsp_main_mode;
+
+#if defined(YAB_SCSP_WORKER)
+  SoundWorkerStart();
+#endif
+
   return ScspChangeSoundCore (coreid);
 }
 
@@ -5181,11 +5273,14 @@ ScspDeInit (void)
 {
   ScspUnMuteAudio(1);
   scsp_mute_flags = 0;
-  thread_running = 0; 
+  thread_running = 0;
 #if defined(ASYNC_SCSP)
   //if (q_scsp_finish) YabAddEventQueue(q_scsp_finish, 0);
   if (q_scsp_frame_start)YabAddEventQueue(q_scsp_frame_start, 0);
   YabThreadWait(YAB_THREAD_SCSP);
+#endif
+#if defined(YAB_SCSP_WORKER)
+  SoundWorkerStop();
 #endif
 
   if (scspchannel[0].data32)
@@ -5268,6 +5363,8 @@ static s32 FASTCALL M68KExecBP (s32 cycles);
 #if defined(ASYNC_SCSP)
 void M68KExec(s32 cycles){}
 void MM68KExec(s32 cycles)
+#elif defined(YAB_SCSP_WORKER)
+static void M68KExec_real(s32 cycles)
 #else
 void M68KExec(s32 cycles)
 #endif
@@ -5283,6 +5380,16 @@ void M68KExec(s32 cycles)
       savedcycles = newcycles;
     }
 }
+
+#if defined(YAB_SCSP_WORKER) && !defined(ASYNC_SCSP)
+/* Fire-and-forget: the SH2/main thread doesn't need M68K's cycle-stepping
+ * to finish before it moves on -- the worker thread's FIFO ordering keeps
+ * everything correctly sequenced relative to later posts/calls. */
+void M68KExec(s32 cycles)
+{
+  SoundWorkerPostExec(M68KExec_real, cycles);
+}
+#endif
 
 void new_scsp_run_sample()
 {
@@ -5321,7 +5428,11 @@ void new_scsp_run_sample()
    new_scsp_outbuf_pos++;
 }
 
+#if defined(YAB_SCSP_WORKER) && !defined(ASYNC_SCSP)
+static void new_scsp_exec_real(s32 cycles)
+#else
 void new_scsp_exec(s32 cycles)
+#endif
 {
    s32 cycles_temp = new_scsp_cycles - cycles;
    if (cycles_temp < 0)
@@ -5331,6 +5442,13 @@ void new_scsp_exec(s32 cycles)
    }
    new_scsp_cycles = cycles_temp;
 }
+
+#if defined(YAB_SCSP_WORKER) && !defined(ASYNC_SCSP)
+void new_scsp_exec(s32 cycles)
+{
+  SoundWorkerPostExec(new_scsp_exec_real, cycles);
+}
+#endif
 
 //----------------------------------------------------------------------------
 
@@ -5377,12 +5495,21 @@ M68KStep (void)
 #if defined(ASYNC_SCSP)
 void M68KSync(void){}
 void MM68KSync (void)
+#elif defined(YAB_SCSP_WORKER)
+static void M68KSync_real(void)
 #else
 void M68KSync(void)
 #endif
 {
   M68K->Sync();
 }
+
+#if defined(YAB_SCSP_WORKER) && !defined(ASYNC_SCSP)
+void M68KSync(void)
+{
+  SoundWorkerPostVoid(M68KSync_real);
+}
+#endif
 
 
 
@@ -5730,6 +5857,11 @@ void ScspExecAsync() {
 
 #endif
 
+#if defined(YAB_SCSP_WORKER)
+  /* Everything posted so far this frame (M68KExec/new_scsp_exec calls) must
+   * have actually run before we read the mixed buffer it produced below. */
+  SoundWorkerBarrier();
+#endif
 
   if (ScspInternalVars->scsptiming1 >= scsplines)
   {
