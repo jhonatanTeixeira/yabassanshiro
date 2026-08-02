@@ -21,6 +21,7 @@ HAVE_FSEEKO = 0
 USE_LTO = 1
 YAB_SYNC_SCSP = 0
 YAB_SCSP_WORKER = 0
+YAB_VDP_WORKER = 0
 
 ifeq ($(platform),)
 	platform = unix
@@ -439,6 +440,15 @@ endif
 # in yabause.c untouched). Off by default.
 ifeq ($(YAB_SCSP_WORKER), 1)
 	FLAGS += -DYAB_SCSP_WORKER
+endif
+
+# Dispatches VDP1 CPU-side draw prep (command-list parsing, vertex/texture
+# prep in Vdp1DrawCommands) to a dedicated worker thread via
+# vdp_worker.cpp's post/barrier primitives. Real gl* submission
+# (VIDCore->Vdp1DrawEnd()) always stays on whichever thread already owns
+# the GL context - this worker only ever does CPU work. Off by default.
+ifeq ($(YAB_VDP_WORKER), 1)
+	FLAGS += -DYAB_VDP_WORKER
 endif
 
 ifeq ($(__USE_OPENGL_DEBUG__),1)

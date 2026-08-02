@@ -52,6 +52,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 #include "vidsoft.h"
 #include "threads.h"
 #include "sh2core.h"
+#include "vdp_worker.h"
 #include <atomic>
 #include <condition_variable>
 #include <chrono>
@@ -252,12 +253,20 @@ extern "C" int Vdp1Init(void) {
    Vdp1Regs->FBCR = 0;
    Vdp1Regs->PTMR = 0;
 
+#if defined(YAB_VDP_WORKER)
+   VdpWorkerStart();
+#endif
+
    return 0;
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 extern "C" void Vdp1DeInit(void) {
+#if defined(YAB_VDP_WORKER)
+   VdpWorkerStop();
+#endif
+
    if (Vdp1Regs)
       free(Vdp1Regs);
    Vdp1Regs = NULL;
@@ -461,7 +470,18 @@ extern "C" void FASTCALL Vdp1WriteWord(u32 addr, u16 val) {
     if (val == 1){
       FRAMELOG("VDP1: VDPEV_DIRECT_DRAW\n");
         Vdp1Regs->EDSR >>= 1;
-        Vdp1Draw(); 
+#if defined(YAB_VDP_WORKER)
+        /* Vdp1Draw() (command-list parsing + vertex/texture prep, all CPU
+         * work, no gl* calls) runs on the VDP worker thread, fire-and-forget.
+         * VdpWorkerBarrier() blocks (condvar+predicate, no polling) until
+         * that finishes before Vdp1DrawEnd() submits it via real gl* calls -
+         * gl* must stay on whichever thread already owns the GL context
+         * today (see vdp_worker.h). */
+        VdpWorkerPostVoid(Vdp1Draw);
+        VdpWorkerBarrier();
+#else
+        Vdp1Draw();
+#endif
         VIDCore->Vdp1DrawEnd();
         yabsys.wait_line_count = yabsys.LineCount + 50;
         yabsys.wait_line_count %= yabsys.MaxLineCount;

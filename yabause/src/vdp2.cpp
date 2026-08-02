@@ -58,6 +58,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 #include "frameprofile.h"
 #include "vidogl.h"
 #include "vidsoft.h"
+#include "vdp_worker.h"
 #include <atomic>
 
 u8 * Vdp2Ram;
@@ -1183,14 +1184,28 @@ void vdp2VBlankOUT(void) {
       LOG("[VDP1] Start Drawing");
       Vdp1Regs->addr = 0;
       Vdp1Regs->COPR = 0;
+#if defined(YAB_VDP_WORKER)
+      /* CPU-side command parsing on the VDP worker thread; barrier before
+       * Vdp2DrawScreens() below submits the result via real gl* calls (see
+       * vdp_worker.h - gl* stays on whichever thread already owns the GL
+       * context). */
+      VdpWorkerPostVoid(Vdp1Draw);
+      VdpWorkerBarrier();
+#else
       Vdp1Draw();
+#endif
       isrender = 1;
     }
   }
   else {
     if ( Vdp1External.status == VDP1_STATUS_RUNNING) {
       LOG("[VDP1] Start Drawing continue");
+#if defined(YAB_VDP_WORKER)
+      VdpWorkerPostVoid(Vdp1Draw);
+      VdpWorkerBarrier();
+#else
       Vdp1Draw();
+#endif
       isrender = 1;
     }
   }
@@ -1205,6 +1220,15 @@ void vdp2VBlankOUT(void) {
 
   if (Vdp2Regs->TVMD & 0x8000) {
      FRAMELOG("Vdp2DrawScreens");
+    /* NOTE: tried posting this to the VDP worker thread (Fase B), same
+     * pattern as Vdp1Draw above - crashed. VIDOGLVdp2DrawScreens() is not
+     * CPU-only like Vdp1DrawCommands was: YglUpdateColorRam(), called at
+     * its very top, makes real gl* calls (glBindTexture/glTexSubImage2D)
+     * directly - calling those from a thread with no current GL context is
+     * undefined behavior (see vdp_worker.h). Needs a real split of
+     * VIDOGLVdp2DrawScreens in vidogl.c (extract YglUpdateColorRam and any
+     * other embedded gl* calls) before this can be moved off this thread -
+     * left as future work, not attempted here. */
     VIDCore->Vdp2DrawScreens();
   }
 

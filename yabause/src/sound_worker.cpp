@@ -1,100 +1,16 @@
 /*
   Implementation of the generic sound worker dispatcher declared in
-  sound_worker.h. See that header for the design rationale.
+  sound_worker.h. See that header for the design rationale, and
+  dispatcher.h for the underlying Post/CallVoid/CallValue primitives
+  (shared with vdp_worker.cpp - extracted here so both workers use the
+  exact same tested synchronization logic instead of duplicating it).
 */
 #include "sound_worker.h"
-
-#include <deque>
-#include <functional>
-#include <future>
-#include <mutex>
-#include <condition_variable>
-#include <thread>
+#include "dispatcher.h"
 
 namespace {
 
-class SoundWorker {
-public:
-  void Start() {
-    std::lock_guard<std::mutex> lk(mtx_);
-    if (running_) return;
-    running_ = true;
-    thread_ = std::thread(&SoundWorker::Run, this);
-  }
-
-  void Stop() {
-    {
-      std::lock_guard<std::mutex> lk(mtx_);
-      if (!running_) return;
-      running_ = false;
-    }
-    cv_.notify_all();
-    if (thread_.joinable()) thread_.join();
-  }
-
-  bool OnWorkerThread() const {
-    return running_ && std::this_thread::get_id() == thread_id_;
-  }
-
-  /* Fire-and-forget. */
-  void Post(std::function<void()> job) {
-    if (OnWorkerThread()) { job(); return; }
-    {
-      std::lock_guard<std::mutex> lk(mtx_);
-      queue_.push_back(std::move(job));
-    }
-    cv_.notify_one();
-  }
-
-  /* Blocking, no result. */
-  void CallVoid(const std::function<void()>& job) {
-    if (OnWorkerThread()) { job(); return; }
-    std::promise<void> done;
-    std::future<void> fut = done.get_future();
-    Post([&job, &done]() {
-      job();
-      done.set_value();
-    });
-    fut.wait();
-  }
-
-  /* Blocking, with result. */
-  template <typename T>
-  T CallValue(const std::function<T()>& job) {
-    if (OnWorkerThread()) return job();
-    std::promise<T> result;
-    std::future<T> fut = result.get_future();
-    Post([&job, &result]() {
-      result.set_value(job());
-    });
-    return fut.get();
-  }
-
-private:
-  void Run() {
-    thread_id_ = std::this_thread::get_id();
-    for (;;) {
-      std::function<void()> job;
-      {
-        std::unique_lock<std::mutex> lk(mtx_);
-        cv_.wait(lk, [this]() { return !running_ || !queue_.empty(); });
-        if (!running_ && queue_.empty()) return;
-        job = std::move(queue_.front());
-        queue_.pop_front();
-      }
-      job();
-    }
-  }
-
-  std::thread thread_;
-  std::thread::id thread_id_;
-  std::mutex mtx_;
-  std::condition_variable cv_;
-  std::deque<std::function<void()>> queue_;
-  bool running_ = false;
-};
-
-SoundWorker g_worker;
+Dispatcher g_worker;
 
 } // namespace
 
