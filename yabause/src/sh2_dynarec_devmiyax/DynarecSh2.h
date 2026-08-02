@@ -23,6 +23,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 
 #include <list>
 #include <map>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -234,7 +235,21 @@ public:
   
   std::unordered_map<u32, int> self_modify_block;
 
+  /* Guards every access to LookupTable/LookupTableRom/LookupTableLow/
+   * LookupTableC/LookupParentTable/self_modify_block/dCode/blockCount below
+   * - this cache is deliberately shared between the Master and Slave SH-2
+   * contexts (they run the same physical code from shared RAM, so reusing
+   * an already-compiled block instead of recompiling it per-core is a
+   * legitimate optimization) but had no synchronization at all before
+   * Master/Slave could ever run on separate OS threads (sh2_slave_worker.cpp).
+   * Call sites in DynarecSh2.cpp's block-lookup/compile path take this lock
+   * for the whole "read pointer -> compile if NULL -> store pointer"
+   * sequence, not just the read, so two threads can never compile the same
+   * address concurrently. */
+  std::mutex cache_mtx_;
+
   inline void setDirty(u32 addr) {
+    std::lock_guard<std::mutex> lk(cache_mtx_);
     addr = adress_mask(addr);
     if (LookupParentTable[addr].size() == 0) return;
     for (auto it = LookupParentTable[addr].begin(); it != LookupParentTable[addr].end(); it++) {
@@ -312,7 +327,11 @@ protected:
 public:
   DynarecSh2();
   ~DynarecSh2();
-  static DynarecSh2 * CurrentContext;
+  /* thread_local, not a plain static: Master and Slave each get their own
+   * "which context is running on me right now" when they run on separate
+   * OS threads (sh2_slave_worker.cpp) instead of sharing one global that
+   * only ever worked because there was a single execution thread. */
+  static thread_local DynarecSh2 * CurrentContext;
   void SetCurrentContext(){ CurrentContext = this; }
   void SetSlave(bool is_slave) { is_slave_ = is_slave; }
   void SetContext(SH2_struct * ctx) { ctx_= ctx;}

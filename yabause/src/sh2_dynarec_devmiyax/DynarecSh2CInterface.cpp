@@ -193,8 +193,20 @@ void SH2DynDebugReset(SH2_struct *context) {
 
 void FASTCALL SH2DynExec(SH2_struct *context, u32 cycles){
   DynarecSh2* pctx = ((DynarecSh2*)context->ext);
+  /* Save/restore, mirroring the existing tmpCurrentSH2 idiom in
+   * SSH2InputCaptureWriteWord (sh2core.c): that handler can reenter
+   * SH2Exec() for the OTHER core from deep inside this one's execution
+   * (FRT input-capture cross-trigger), which unconditionally overwrote
+   * CurrentContext with no restore, left it pointing at the wrong core
+   * once the nested call returned, and corrupted the outer core's
+   * memcycle_ bookkeeping (memSetByte/Word/Long read CurrentContext-
+   * >memcycle_ after the write that can trigger the reentrant call).
+   * This was already wrong single-threaded; thread_local alone doesn't
+   * fix it since the clobber happens within one thread's own nested call. */
+  DynarecSh2* prevContext = DynarecSh2::CurrentContext;
   pctx->SetCurrentContext();
   pctx->ExecuteCount(cycles);
+  DynarecSh2::CurrentContext = prevContext;
 }
 
 void SH2DynSendInterrupt(SH2_struct *context, u8 vector, u8 level){

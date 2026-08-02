@@ -182,6 +182,8 @@ endif
 SOURCES_CXX := $(SOURCE_DIR)/Counter.cpp \
 	$(SOURCE_DIR)/sound_worker.cpp \
 	$(SOURCE_DIR)/vdp_worker.cpp \
+	$(SOURCE_DIR)/sh2_slave_worker.cpp \
+	$(SOURCE_DIR)/scu_dsp_worker.cpp \
 	$(SOURCE_DIR)/ygl_texture.cpp \
         $(SOURCE_DIR)/vdp1.cpp \
         $(SOURCE_DIR)/vdp2.cpp
@@ -189,6 +191,12 @@ ifeq ($(YAB_SCSP_WORKER), 1)
 	FLAGS += -pthread
 endif
 ifeq ($(YAB_VDP_WORKER), 1)
+	FLAGS += -pthread
+endif
+ifeq ($(YAB_SH2_SLAVE_WORKER), 1)
+	FLAGS += -pthread
+endif
+ifeq ($(YAB_SCU_DSP_WORKER), 1)
 	FLAGS += -pthread
 endif
 

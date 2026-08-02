@@ -61,6 +61,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 #include "scspdsp.h"
 #include "scu.h"
 #include "sh2core.h"
+#include "sh2_slave_worker.h"
 #include "smpc.h"
 #include "ygl.h"
 #include "vidsoft.h"
@@ -744,17 +745,29 @@ int YabauseEmulate(void) {
         if( amari != 0 ){
           SH2Exec(MSH2, amari);
           if (yabsys.IsSSH2Running)
+#if defined(YAB_SH2_SLAVE_WORKER)
+          { Sh2SlaveWorkerPostExec(SH2Exec, SSH2, amari); Sh2SlaveWorkerBarrier(); }
+#else
             SH2Exec(SSH2, amari);
+#endif
         }
-        for (i = amari; i < sh2cycles; i += step){ 
+        for (i = amari; i < sh2cycles; i += step){
             SH2Exec(MSH2, step);
             if (yabsys.IsSSH2Running)
+#if defined(YAB_SH2_SLAVE_WORKER)
+            { Sh2SlaveWorkerPostExec(SH2Exec, SSH2, step); Sh2SlaveWorkerBarrier(); }
+#else
                SH2Exec(SSH2, step);
+#endif
         }
       }else{
         SH2Exec(MSH2, sh2cycles);
         if (yabsys.IsSSH2Running)
+#if defined(YAB_SH2_SLAVE_WORKER)
+        { Sh2SlaveWorkerPostExec(SH2Exec, SSH2, sh2cycles); Sh2SlaveWorkerBarrier(); }
+#else
           SH2Exec(SSH2, sh2cycles);
+#endif
       }
 
 #ifdef YAB_STATICS
@@ -917,6 +930,10 @@ void YabauseStartSlave(void) {
 
   LOG("YabauseStartSlave");
 
+#if defined(YAB_SH2_SLAVE_WORKER)
+   Sh2SlaveWorkerStart();
+#endif
+
    if (yabsys.emulatebios)
    {
       CurrentSH2 = SSH2;
@@ -964,8 +981,15 @@ void YabauseStartSlave(void) {
 //////////////////////////////////////////////////////////////////////////////
 
 void YabauseStopSlave(void) {
-   SH2Reset(SSH2);
    yabsys.IsSSH2Running = 0;
+#if defined(YAB_SH2_SLAVE_WORKER)
+   /* Stop (join) the worker before SH2Reset() touches SSH2's state, so no
+    * queued/racing job can run against it mid-reset. IsSSH2Running is
+    * cleared first so the emulation loop stops Post'ing new jobs; Stop()
+    * itself drains anything already queued before joining. */
+   Sh2SlaveWorkerStop();
+#endif
+   SH2Reset(SSH2);
 }
 
 //////////////////////////////////////////////////////////////////////////////

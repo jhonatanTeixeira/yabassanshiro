@@ -47,6 +47,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 #include "memory.h"
 #include "sh2core.h"
 #include "yabause.h"
+#include "scu_dsp_worker.h"
 #include <inttypes.h>
 
 #ifdef OPTIMIZED_DMA
@@ -96,13 +97,21 @@ int ScuInit(void) {
    ScuBP->numcodebreakpoints = 0;
    ScuBP->BreakpointCallBack=NULL;
    ScuBP->inbreakpoint=0;
-   
+
+#if defined(YAB_SCU_DSP_WORKER)
+   ScuDspWorkerStart();
+#endif
+
    return 0;
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 void ScuDeInit(void) {
+#if defined(YAB_SCU_DSP_WORKER)
+   ScuDspWorkerStop();
+#endif
+
    if (ScuRegs)
       free(ScuRegs);
    ScuRegs = NULL;
@@ -1305,50 +1314,19 @@ void ScuDmaProc(Scu * scu, int time) {
 }
 
 //////////////////////////////////////////////////////////////////////////////
-void ScuExec(u32 timing) {
+
+/* The DSP instruction-interpreter loop below (originally the body of the
+ * "is dsp executing?" block in ScuExec(), see the new ScuExec() further
+ * down) is split into its own function so it can be dispatched to its own
+ * worker thread (scu_dsp_worker.h) independently of the system-timer/DMA
+ * work in ScuExec(), which always stays inline on the caller's thread.
+ *
+ * Deliberately NOT synchronized against the SH-2 Master/Slave threads for
+ * the DMA instructions' MappedMemoryReadLong/WriteLong access to shared
+ * WRAM (dsp_dma01..04 etc., reached via step_dsp_dma below) - see
+ * scu_dsp_worker.h's doc comment for why. */
+static void ScuDspRunLoop(u32 timing) {
    int i;
-
-   if ( ScuRegs->T1MD & 0x1 ){
-     if (ScuRegs->T1MD & 0x80 == 0) {
-       ScuTimer1Exec(timing);
-     }
-     else {
-       if (yabsys.LineCount == ScuRegs->T0C || ScuRegs->T0C > 500 ) {
-         ScuTimer1Exec(timing);
-       }
-     }
-   }
-
-#if OLD_DMA
-   if (ScuRegs->dma0_time > 0) {
-     //ScuRegs->dma0_time -= (timing << 4); // ToDo: memory clock
-     //if (ScuRegs->dma0_time < 0) {
-     ScuSendLevel0DMAEnd();
-     ScuRegs->dma0_time = 0;
-     //}
-   }
-
-   else if (ScuRegs->dma1_time > 0) {
-     //ScuRegs->dma1_time -= (timing << 4); // ToDo: memory clock
-     //if (ScuRegs->dma1_time < 0) {
-     ScuSendLevel1DMAEnd();
-     ScuRegs->dma1_time = 0;
-     //}
-   }
-
-   else if (ScuRegs->dma2_time > 0) {
-     //ScuRegs->dma0_time -= (timing << 4); // ToDo: memory clock
-     //if (ScuRegs->dma0_time < 0) {
-     ScuSendLevel2DMAEnd();
-     ScuRegs->dma2_time = 0;
-     //}
-   }
-#else
-  ScuDmaProc(ScuRegs, (int)timing<<4);
-#endif
-
-   // is dsp executing?
-   if (ScuDsp->ProgControlPort.part.EX) {
 
 #ifdef DSPLOG
      if (slogp == NULL){
@@ -1967,6 +1945,57 @@ void ScuExec(u32 timing) {
          }
          dsp_counter--;
       }
+}
+
+void ScuExec(u32 timing) {
+
+   if ( ScuRegs->T1MD & 0x1 ){
+     if (ScuRegs->T1MD & 0x80 == 0) {
+       ScuTimer1Exec(timing);
+     }
+     else {
+       if (yabsys.LineCount == ScuRegs->T0C || ScuRegs->T0C > 500 ) {
+         ScuTimer1Exec(timing);
+       }
+     }
+   }
+
+#if OLD_DMA
+   if (ScuRegs->dma0_time > 0) {
+     //ScuRegs->dma0_time -= (timing << 4); // ToDo: memory clock
+     //if (ScuRegs->dma0_time < 0) {
+     ScuSendLevel0DMAEnd();
+     ScuRegs->dma0_time = 0;
+     //}
+   }
+
+   else if (ScuRegs->dma1_time > 0) {
+     //ScuRegs->dma1_time -= (timing << 4); // ToDo: memory clock
+     //if (ScuRegs->dma1_time < 0) {
+     ScuSendLevel1DMAEnd();
+     ScuRegs->dma1_time = 0;
+     //}
+   }
+
+   else if (ScuRegs->dma2_time > 0) {
+     //ScuRegs->dma0_time -= (timing << 4); // ToDo: memory clock
+     //if (ScuRegs->dma0_time < 0) {
+     ScuSendLevel2DMAEnd();
+     ScuRegs->dma2_time = 0;
+     //}
+   }
+#else
+  ScuDmaProc(ScuRegs, (int)timing<<4);
+#endif
+
+   // is dsp executing?
+   if (ScuDsp->ProgControlPort.part.EX) {
+#if defined(YAB_SCU_DSP_WORKER)
+     ScuDspWorkerPostExec(ScuDspRunLoop, timing);
+     ScuDspWorkerBarrier();
+#else
+     ScuDspRunLoop(timing);
+#endif
    }
 }
 

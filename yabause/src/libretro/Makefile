@@ -22,6 +22,8 @@ USE_LTO = 1
 YAB_SYNC_SCSP = 0
 YAB_SCSP_WORKER = 0
 YAB_VDP_WORKER = 0
+YAB_SH2_SLAVE_WORKER = 0
+YAB_SCU_DSP_WORKER = 0
 
 ifeq ($(platform),)
 	platform = unix
@@ -449,6 +451,22 @@ endif
 # the GL context - this worker only ever does CPU work. Off by default.
 ifeq ($(YAB_VDP_WORKER), 1)
 	FLAGS += -DYAB_VDP_WORKER
+endif
+
+# Dispatches the SH-2 Slave core's SH2Exec() calls to a dedicated worker
+# thread via sh2_slave_worker.cpp's post/barrier primitives (Master keeps
+# running inline on the main thread as today). Off by default.
+ifeq ($(YAB_SH2_SLAVE_WORKER), 1)
+	FLAGS += -DYAB_SH2_SLAVE_WORKER
+endif
+
+# Dispatches the SCU DSP instruction-interpreter loop (ScuDspRunLoop in
+# scu.c) to a dedicated worker thread via scu_dsp_worker.cpp's post/barrier
+# primitives. The SCU's system-timer/DMA work in ScuExec() always stays
+# inline on the caller's thread - only the DSP program interpreter itself
+# moves. Off by default.
+ifeq ($(YAB_SCU_DSP_WORKER), 1)
+	FLAGS += -DYAB_SCU_DSP_WORKER
 endif
 
 ifeq ($(__USE_OPENGL_DEBUG__),1)

@@ -47,7 +47,7 @@ extern "C" {
 //#define LOG printf
 
 CompileBlocks * CompileBlocks::instance_ = NULL;
-DynarecSh2 * DynarecSh2::CurrentContext = NULL;
+thread_local DynarecSh2 * DynarecSh2::CurrentContext = NULL;
 #if !defined(_WINDOWS)
 #if defined(__arm__)
 void cacheflush(uintptr_t begin, uintptr_t end, int flag )
@@ -1406,100 +1406,115 @@ inline int DynarecSh2::Execute(){
 #endif
 //#endif
 
-  if ((GET_PC() & 0xFF000000) == 0xC0000000)
   {
-    pBlock = m_pCompiler->LookupTableC[(GET_PC() & 0x000FFFFF) >> 1];
-    if (pBlock == NULL)
-    {
-      pBlock = m_pCompiler->CompileBlock(GET_PC());
-      m_pCompiler->LookupTableC[(GET_PC() & 0x000FFFFF) >> 1] = pBlock;
-      if (pBlock == NULL) {
-        Undecoded();
-        return IN_INFINITY_LOOP;
-      }
-    }
-  }
-  else {
+    /* Held only for the "read pointer -> compile if NULL -> store pointer"
+     * resolution in this block, NOT for the JIT block execution that follows
+     * it below: this cache is shared between the Master and Slave contexts
+     * (see cache_mtx_'s doc comment in DynarecSh2.h) and, with the Slave now
+     * able to run on its own OS thread (sh2_slave_worker.cpp), two threads
+     * racing to compile the same address at once is a real possibility, not
+     * hypothetical. The lock must NOT extend over pBlock->code execution
+     * below: that would serialize actual Master/Slave execution against each
+     * other (not just cache resolution) and risks deadlock against the
+     * FRT Input Capture cross-trigger's reentrant call back to the Master
+     * thread (see sh2core.c SSH2InputCaptureWriteWord). */
+    std::lock_guard<std::mutex> cache_lk(m_pCompiler->cache_mtx_);
 
-    switch (GET_PC() & 0x0FF00000)
+    if ((GET_PC() & 0xFF000000) == 0xC0000000)
     {
-
-      // ROM
-    case 0x00000000:
-      if (yabsys.extend_backup) {
-        const u32 bupaddr = 0x0007d600; // MappedMemoryReadLong(0x06000358);
-        if (GET_PC() == bupaddr) {
-          LOG("BUP_Init");
-          BiosBUPInit(ctx_);
-          yabsys.extend_backup = 2;
-          return IN_INFINITY_LOOP;
-        }
-        else if (yabsys.extend_backup == 2 &&
-          GET_PC() >= 0x0380 &&
-          GET_PC() <= 0x03A8) {
-          BiosHandleFunc(ctx_);
-          return IN_INFINITY_LOOP;
-        }
-      }
-      if (yabsys.emulatebios) {
-        ctx_->cycles = 0;
-         BiosHandleFunc(ctx_);
-         memcycle_ += ctx_->cycles;
-        return 0;
-      }
-      pBlock = m_pCompiler->LookupTableRom[(GET_PC() & 0x000FFFFF) >> 1];
+      pBlock = m_pCompiler->LookupTableC[(GET_PC() & 0x000FFFFF) >> 1];
       if (pBlock == NULL)
       {
+        pBlock = m_pCompiler->CompileBlock(GET_PC());
+        m_pCompiler->LookupTableC[(GET_PC() & 0x000FFFFF) >> 1] = pBlock;
+        if (pBlock == NULL) {
+          Undecoded();
+          return IN_INFINITY_LOOP;
+        }
+      }
+    }
+    else {
+
+      switch (GET_PC() & 0x0FF00000)
+      {
+
+        // ROM
+      case 0x00000000:
+        if (yabsys.extend_backup) {
+          const u32 bupaddr = 0x0007d600; // MappedMemoryReadLong(0x06000358);
+          if (GET_PC() == bupaddr) {
+            LOG("BUP_Init");
+            BiosBUPInit(ctx_);
+            yabsys.extend_backup = 2;
+            return IN_INFINITY_LOOP;
+          }
+          else if (yabsys.extend_backup == 2 &&
+            GET_PC() >= 0x0380 &&
+            GET_PC() <= 0x03A8) {
+            BiosHandleFunc(ctx_);
+            return IN_INFINITY_LOOP;
+          }
+        }
+        if (yabsys.emulatebios) {
+          ctx_->cycles = 0;
+           BiosHandleFunc(ctx_);
+           memcycle_ += ctx_->cycles;
+          return 0;
+        }
+        pBlock = m_pCompiler->LookupTableRom[(GET_PC() & 0x000FFFFF) >> 1];
+        if (pBlock == NULL)
+        {
+          pBlock = m_pCompiler->CompileBlock(GET_PC());
+          if (pBlock == NULL) {
+            Undecoded();
+            return IN_INFINITY_LOOP;
+          }
+          m_pCompiler->LookupTableRom[(GET_PC() & 0x000FFFFF) >> 1] = pBlock;
+        }
+        break;
+
+        // Low Memory
+      case 0x00200000:
+        pBlock = m_pCompiler->LookupTableLow[(GET_PC() & 0x000FFFFF) >> 1];
+        if (pBlock == NULL)
+        {
+          pBlock = m_pCompiler->CompileBlock(GET_PC());
+          if (pBlock == NULL) {
+            Undecoded();
+            return IN_INFINITY_LOOP;
+          }
+          m_pCompiler->LookupTableLow[(GET_PC() & 0x000FFFFF) >> 1] = pBlock;
+        }
+        break;
+
+        // High Memory
+      case 0x06000000:
+        /*case 0x06100000:*/
+
+        pBlock = m_pCompiler->LookupTable[(GET_PC() & 0x000FFFFF) >> 1];
+        if (pBlock == NULL)
+        {
+          pBlock = m_pCompiler->CompileBlock(GET_PC(), m_pCompiler->LookupParentTable);
+          if (pBlock == NULL) {
+            Undecoded();
+            return IN_INFINITY_LOOP;
+          }
+          m_pCompiler->LookupTable[(GET_PC() & 0x000FFFFF) >> 1] = pBlock;
+        }
+        break;
+
+        // Cache
+      default:
         pBlock = m_pCompiler->CompileBlock(GET_PC());
         if (pBlock == NULL) {
           Undecoded();
           return IN_INFINITY_LOOP;
         }
-        m_pCompiler->LookupTableRom[(GET_PC() & 0x000FFFFF) >> 1] = pBlock;
+        break;
       }
-      break;
-
-      // Low Memory
-    case 0x00200000:
-      pBlock = m_pCompiler->LookupTableLow[(GET_PC() & 0x000FFFFF) >> 1];
-      if (pBlock == NULL)
-      {
-        pBlock = m_pCompiler->CompileBlock(GET_PC());
-        if (pBlock == NULL) {
-          Undecoded();
-          return IN_INFINITY_LOOP;
-        }
-        m_pCompiler->LookupTableLow[(GET_PC() & 0x000FFFFF) >> 1] = pBlock;
-      }
-      break;
-
-      // High Memory
-    case 0x06000000:
-      /*case 0x06100000:*/
-
-      pBlock = m_pCompiler->LookupTable[(GET_PC() & 0x000FFFFF) >> 1];
-      if (pBlock == NULL)
-      {
-        pBlock = m_pCompiler->CompileBlock(GET_PC(), m_pCompiler->LookupParentTable);
-        if (pBlock == NULL) {
-          Undecoded();
-          return IN_INFINITY_LOOP;
-        }
-        m_pCompiler->LookupTable[(GET_PC() & 0x000FFFFF) >> 1] = pBlock;
-      }
-      break;
-
-      // Cache
-    default:
-      pBlock = m_pCompiler->CompileBlock(GET_PC());
-      if (pBlock == NULL) {
-        Undecoded();
-        return IN_INFINITY_LOOP;
-      }
-      break;
     }
   }
-    
+
 #if 0
     static FILE * fp = NULL;
     char fname[64];
