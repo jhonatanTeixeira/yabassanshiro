@@ -62,6 +62,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 #include "scu.h"
 #include "sh2core.h"
 #include "sh2_slave_worker.h"
+#include "scu_dsp_worker.h"
 #include "smpc.h"
 #include "ygl.h"
 #include "vidsoft.h"
@@ -473,11 +474,36 @@ void YabFlushBackups(void)
 //////////////////////////////////////////////////////////////////////////////
 
 void YabauseDeInit(void) {
-   
+
    Vdp2DeInit();
    Vdp1DeInit();
-   
+
    SH2DeInit();
+
+   /* Stop both worker threads here, unconditionally, before anything below
+    * frees memory they can still touch (HighWram/LowWram - the SCU DSP's
+    * DMA instructions read/write it directly and unlocked by design; see
+    * scu_dsp_worker.h). ScuDeInit() further down also stops the DSP worker,
+    * which is a safe no-op the second time (Dispatcher::Stop() is a no-op
+    * if not running) - this earlier call just guarantees the ordering.
+    *
+    * The Sh2SlaveWorkerStop() call is the important one: unlike the DSP
+    * worker (started/stopped together with ScuInit()/ScuDeInit()), the
+    * Slave worker is only started/stopped via YabauseStartSlave()/
+    * YabauseStopSlave(), which are reached from in-game SMPC commands
+    * (SSHOFF, CKCHG) or YabauseResetNoLoad() - NOT from this normal
+    * unload/shutdown path. Without this call, closing a game that had ever
+    * turned the Slave on left its worker thread parked forever, waiting on
+    * a job that would never come; when the core's static Dispatcher object
+    * was later destroyed with that thread still joinable, the C++ runtime
+    * calls std::terminate() - which can present as a hang rather than a
+    * clean exit, depending on how the frontend reacts to the abort. */
+#if defined(YAB_SH2_SLAVE_WORKER)
+   Sh2SlaveWorkerStop();
+#endif
+#if defined(YAB_SCU_DSP_WORKER)
+   ScuDspWorkerStop();
+#endif
 
    if (BiosRom)
       T2MemoryDeInit(BiosRom);
@@ -721,6 +747,13 @@ int YabauseEmulate(void) {
    SH2OnFrame(MSH2);
    SH2OnFrame(SSH2);
    u64 cpu_emutime = 0;
+#if defined(YAB_SH2_SLAVE_WORKER)
+   /* Accumulates this scanline's worth of Slave cycles across all ~10
+    * decilines, so we hand the worker ONE bigger job per scanline instead
+    * of posting (and paying a wake-up) on every single deciline. Reset to
+    * 0 right after each scanline's flush, below. */
+   u32 sh2_slave_cycle_batch = 0;
+#endif
    while (!oneframeexec)
    {
       PROFILE_START("Total Emulation");
@@ -743,28 +776,51 @@ int YabauseEmulate(void) {
         const u32 amari = sh2cycles - (step<< div);
 
         if( amari != 0 ){
+#if defined(YAB_SH2_SLAVE_WORKER)
+          Sh2MasterExecMutexLock();
+#endif
           SH2Exec(MSH2, amari);
+#if defined(YAB_SH2_SLAVE_WORKER)
+          Sh2MasterExecMutexUnlock();
+#endif
           if (yabsys.IsSSH2Running)
 #if defined(YAB_SH2_SLAVE_WORKER)
-          { Sh2SlaveWorkerPostExec(SH2Exec, SSH2, amari); Sh2SlaveWorkerBarrier(); }
+            /* Accumulate only - posted once per scanline, see the flush
+             * right before Sh2SlaveWorkerBarrier() below. Posting (and
+             * paying a worker wake-up) on every single deciline - even
+             * fire-and-forget, even with the wait already batched - was
+             * still ~2600 wake-ups a frame; this cuts it to ~260. */
+            sh2_slave_cycle_batch += amari;
 #else
             SH2Exec(SSH2, amari);
 #endif
         }
         for (i = amari; i < sh2cycles; i += step){
+#if defined(YAB_SH2_SLAVE_WORKER)
+            Sh2MasterExecMutexLock();
+#endif
             SH2Exec(MSH2, step);
+#if defined(YAB_SH2_SLAVE_WORKER)
+            Sh2MasterExecMutexUnlock();
+#endif
             if (yabsys.IsSSH2Running)
 #if defined(YAB_SH2_SLAVE_WORKER)
-            { Sh2SlaveWorkerPostExec(SH2Exec, SSH2, step); Sh2SlaveWorkerBarrier(); }
+              sh2_slave_cycle_batch += step;
 #else
                SH2Exec(SSH2, step);
 #endif
         }
       }else{
+#if defined(YAB_SH2_SLAVE_WORKER)
+        Sh2MasterExecMutexLock();
+#endif
         SH2Exec(MSH2, sh2cycles);
+#if defined(YAB_SH2_SLAVE_WORKER)
+        Sh2MasterExecMutexUnlock();
+#endif
         if (yabsys.IsSSH2Running)
 #if defined(YAB_SH2_SLAVE_WORKER)
-        { Sh2SlaveWorkerPostExec(SH2Exec, SSH2, sh2cycles); Sh2SlaveWorkerBarrier(); }
+          sh2_slave_cycle_batch += sh2cycles;
 #else
           SH2Exec(SSH2, sh2cycles);
 #endif
@@ -788,6 +844,35 @@ int YabauseEmulate(void) {
          PROFILE_START("SCSP");
          ScspExec();
          PROFILE_STOP("SCSP");
+#if defined(YAB_SH2_SLAVE_WORKER)
+         /* Post this whole scanline's accumulated Slave cycles as ONE job,
+          * then catch up on it - same granularity as SoundWorkerBarrier()
+          * above. Posting once per scanline instead of once per deciline
+          * cuts the worker wake-up count from ~2600/frame to ~260/frame;
+          * see sh2_slave_worker.h for the measured cost that made this
+          * worthwhile.
+          *
+          * Gated on IsSSH2Running, unlike ScuDspWorkerBarrier() below: the
+          * SH2 Slave dispatcher is only Start()'ed inside YabauseStartSlave()
+          * (when a game issues SSHON), not unconditionally at core init like
+          * the DSP worker is. Calling Barrier() while it was never started
+          * queues the wait-job with no worker thread ever going to run it -
+          * CallVoid()'s fut.wait() then blocks forever. Most games begin
+          * with the Slave off, so an unguarded call here hung on literally
+          * the first scanline of emulation. */
+         if (yabsys.IsSSH2Running) {
+           if (sh2_slave_cycle_batch > 0)
+             Sh2SlaveWorkerPostExec(SH2Exec, SSH2, sh2_slave_cycle_batch);
+           Sh2SlaveWorkerBarrier();
+         }
+         sh2_slave_cycle_batch = 0;
+#endif
+#if defined(YAB_SCU_DSP_WORKER)
+         /* Same batching idea for the SCU DSP - ScuDspFlushAndBarrier()
+          * posts this scanline's accumulated DSP cycles as one job (see
+          * scu.c) then waits, instead of posting on every deciline. */
+         ScuDspFlushAndBarrier();
+#endif
          yabsys.DecilineCount = 0;
          yabsys.LineCount++;
 

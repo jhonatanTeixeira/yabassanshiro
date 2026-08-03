@@ -63,6 +63,13 @@ scubp_struct * ScuBP;
 static int incFlg[4] = { 0 };
 static void ScuTestInterruptMask(void);
 
+#if defined(YAB_SCU_DSP_WORKER)
+/* Accumulates this scanline's worth of DSP cycles across all ScuExec()
+ * calls (once per deciline), flushed as one job by ScuDspFlushAndBarrier()
+ * - see that function and ScuExec()'s DSP dispatch below. */
+static u32 g_scu_dsp_cycle_batch = 0;
+#endif
+
 void ScuRemoveInterruptByCPU(u32 pre, u32 after);
 void step_dsp_dma(scudspregs_struct *sc);
 
@@ -1991,13 +1998,48 @@ void ScuExec(u32 timing) {
    // is dsp executing?
    if (ScuDsp->ProgControlPort.part.EX) {
 #if defined(YAB_SCU_DSP_WORKER)
-     ScuDspWorkerPostExec(ScuDspRunLoop, timing);
-     ScuDspWorkerBarrier();
+     /* Accumulate only - posted as ONE job per scanline by
+      * ScuDspFlushAndBarrier() below, instead of posting (and paying a
+      * worker wake-up) on every single ScuExec() call. An immediate
+      * barrier on every call (once per deciline) was the actual source of
+      * the CPU/framerate regression found when testing against a game
+      * that drives the DSP heavily; batching the wait alone (still posting
+      * every deciline) was measurably better but still paid a wake-up on
+      * every deciline the DSP was active - see sh2_slave_worker.h for the
+      * same reasoning applied to the Slave.
+      *
+      * This does reopen a narrow race on ScuDsp->ProgControlPort.part.EX
+      * itself: this check reads it on the caller's thread while a queued-
+      * but-not-yet-run ScuDspRunLoop on the worker thread may be about to
+      * flip it (DSP program ending mid-scanline). Worst case is a stray
+      * extra dsp_counter iteration or two running against whatever state
+      * comes next before the per-scanline barrier catches up - not a
+      * crash, and the same class of accepted tradeoff as the SoundRam
+      * access left unlocked elsewhere in this project. Revisit if testing
+      * shows this actually causes a visible DSP glitch (not just a timing
+      * curiosity). */
+     g_scu_dsp_cycle_batch += timing;
 #else
      ScuDspRunLoop(timing);
 #endif
    }
 }
+
+#if defined(YAB_SCU_DSP_WORKER)
+/* Posts this scanline's accumulated DSP cycles (see g_scu_dsp_cycle_batch
+ * above) as one job, then waits for it - called once per scanline from
+ * yabause.c, next to SoundWorkerBarrier()/Sh2SlaveWorkerBarrier(). Safe to
+ * call unconditionally every scanline (unlike the Slave worker): the DSP
+ * worker is Start()'ed unconditionally in ScuInit(), not gated on any
+ * in-game state, so the dispatcher always exists by the time this runs. */
+void ScuDspFlushAndBarrier(void) {
+  if (g_scu_dsp_cycle_batch > 0) {
+    ScuDspWorkerPostExec(ScuDspRunLoop, g_scu_dsp_cycle_batch);
+    g_scu_dsp_cycle_batch = 0;
+  }
+  ScuDspWorkerBarrier();
+}
+#endif
 
 //////////////////////////////////////////////////////////////////////////////
 

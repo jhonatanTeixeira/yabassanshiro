@@ -302,6 +302,13 @@ extern "C" {
   void ScuReset(void);
   void ScuExec(u32 timing);
 
+#if defined(YAB_SCU_DSP_WORKER)
+  /* Flushes this scanline's batched DSP cycles (accumulated by ScuExec())
+   * as one job, then waits for it. Called once per scanline from
+   * yabause.c - see scu.c for the accumulator and rationale. */
+  void ScuDspFlushAndBarrier(void);
+#endif
+
   u8 FASTCALL	ScuReadByte(u32);
   u16 FASTCALL	ScuReadWord(u32);
   u32 FASTCALL	ScuReadLong(u32);

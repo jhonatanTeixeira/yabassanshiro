@@ -46,6 +46,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 #include "debug.h"
 #include "memory.h"
 #include "yabause.h"
+#include "sh2_slave_worker.h"
 
 #if defined(SH2_DYNAREC)
 #include "sh2_dynarec/sh2_dynarec.h"
@@ -2614,12 +2615,25 @@ void FASTCALL SSH2InputCaptureWriteWord(UNUSED u32 addr, UNUSED u16 data)
    if (CurrentSH2->depth < 4) {
      CurrentSH2->depth++;
      SH2_struct * tmpCurrentSH2 = CurrentSH2;
+     /* Sh2MasterExecMutexLock/Unlock: both branches here can now run
+      * genuinely concurrently, in wall-clock time, with the OTHER core's
+      * own execution on a different thread (see sh2_slave_worker.h's top
+      * comment) - this reentrant call is exactly the case that lock exists
+      * for. Recursive, so it's safe even though this whole function may
+      * already be running from inside a locked SH2Exec(SSH2, ...) call on
+      * the Slave worker thread. */
+#if defined(YAB_SH2_SLAVE_WORKER)
+     Sh2MasterExecMutexLock();
+#endif
      if (CurrentSH2->isslave) {
        SH2Exec(MSH2, 32);
      }
      else {
        SH2Exec(SSH2, 32);
      }
+#if defined(YAB_SH2_SLAVE_WORKER)
+     Sh2MasterExecMutexUnlock();
+#endif
      CurrentSH2 = tmpCurrentSH2;
      CurrentSH2->depth--;
    }
