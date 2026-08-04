@@ -42,6 +42,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
     \brief SH2 interpreter interface
 */
 
+#include <string.h>
 #include "sh2core.h"
 #include "sh2int.h"
 #include "sh2idle.h"
@@ -3149,8 +3150,48 @@ FASTCALL void SH2DebugInterpreterExec(SH2_struct *context, u32 cycles)
 //////////////////////////////////////////////////////////////////////////////
 
 #if defined(TRACE_INTERP_PC)
-static FILE * s_interp_trace_fp = NULL;
-static u64 s_interp_trace_count = 0;
+extern u64 YabTraceFrameCounter;
+
+/* Fixed-size open-addressing "seen this PC before" set, so we only ever
+ * record each address the FIRST time it's ever fetched (globally, not
+ * per-frame) - the interpreter's equivalent of "this is where a real JIT
+ * would have compiled a new block", instead of every single instruction
+ * fetch. 0xFFFFFFFF is the empty-slot sentinel (not a reachable SH-2 PC). */
+#define TRACE_SEEN_TABLE_SIZE (1u << 18)
+static u32 s_interp_trace_seen[TRACE_SEEN_TABLE_SIZE];
+static int s_interp_trace_seen_init = 0;
+
+static int TraceMarkSeen(u32 pc) {
+  u32 idx = (u32)((pc >> 1) * 2654435761u) & (TRACE_SEEN_TABLE_SIZE - 1);
+  u32 start = idx;
+  if (!s_interp_trace_seen_init) {
+    memset(s_interp_trace_seen, 0xFF, sizeof(s_interp_trace_seen));
+    s_interp_trace_seen_init = 1;
+  }
+  for (;;) {
+    if (s_interp_trace_seen[idx] == pc) return 0; // already seen
+    if (s_interp_trace_seen[idx] == 0xFFFFFFFFu) {
+      s_interp_trace_seen[idx] = pc;
+      return 1; // newly seen
+    }
+    idx = (idx + 1) & (TRACE_SEEN_TABLE_SIZE - 1);
+    if (idx == start) return 0; // table full (shouldn't happen in practice)
+  }
+}
+
+/* Accumulates this frame's newly-seen addresses in memory instead of
+ * writing straight to a file - libretro.c's YuiSwapBuffers() (same thread,
+ * called once the frame is fully rendered) reads this out via
+ * TraceFrameAddrCount()/TraceFrameAddr() and, if non-empty, writes a
+ * frameN.txt of these addresses alongside a frameN.png screenshot, then
+ * calls TraceFrameReset() to start the next frame's accumulation. */
+#define TRACE_FRAME_MAX_ADDRS 4096
+static u32 s_trace_frame_addrs[TRACE_FRAME_MAX_ADDRS];
+static int s_trace_frame_addr_count = 0;
+
+int TraceFrameAddrCount(void) { return s_trace_frame_addr_count; }
+u32 TraceFrameAddr(int i) { return s_trace_frame_addrs[i]; }
+void TraceFrameReset(void) { s_trace_frame_addr_count = 0; }
 #endif
 
 FASTCALL void SH2InterpreterExec(SH2_struct *context, u32 cycles)
@@ -3176,11 +3217,9 @@ FASTCALL void SH2InterpreterExec(SH2_struct *context, u32 cycles)
       context->instruction = fetchlist[(context->regs.PC >> 20) & 0x0FF](context->regs.PC);
 
 #if defined(TRACE_INTERP_PC)
-      if (context == MSH2 && s_interp_trace_count < 3000000) {
-        if (s_interp_trace_fp == NULL) s_interp_trace_fp = fopen("/tmp/interp_pc_trace.log", "w");
-        if (s_interp_trace_fp) fprintf(s_interp_trace_fp, "%08X\n", context->regs.PC);
-        s_interp_trace_count++;
-        if ((s_interp_trace_count % 4096) == 0 && s_interp_trace_fp) fflush(s_interp_trace_fp);
+      if (context == MSH2 && TraceMarkSeen(context->regs.PC)) {
+        if (s_trace_frame_addr_count < TRACE_FRAME_MAX_ADDRS)
+          s_trace_frame_addrs[s_trace_frame_addr_count++] = context->regs.PC;
       }
 #endif
 

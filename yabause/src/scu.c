@@ -64,9 +64,10 @@ static int incFlg[4] = { 0 };
 static void ScuTestInterruptMask(void);
 
 #if defined(YAB_SCU_DSP_WORKER)
-/* Accumulates this scanline's worth of DSP cycles across all ScuExec()
- * calls (once per deciline), flushed as one job by ScuDspFlushAndBarrier()
- * - see that function and ScuExec()'s DSP dispatch below. */
+/* Accumulates the WHOLE FRAME's worth of DSP cycles across all ScuExec()
+ * calls (once per deciline), flushed as one job per frame (at VBlankIN, in
+ * yabause.c) by ScuDspFlushAndBarrier() - see that function and ScuExec()'s
+ * DSP dispatch below. */
 static u32 g_scu_dsp_cycle_batch = 0;
 #endif
 

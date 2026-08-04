@@ -32,6 +32,15 @@
 #include "vidsoft.h"
 #include "ygl.h"
 
+#if defined(TRACE_INTERP_PC)
+#include <formats/rpng.h>
+
+extern u64 YabTraceFrameCounter;
+extern int TraceFrameAddrCount(void);
+extern u32 TraceFrameAddr(int i);
+extern void TraceFrameReset(void);
+#endif
+
 yabauseinit_struct yinit;
 
 static char slash = path_default_slash_c();
@@ -583,6 +592,52 @@ void retro_set_resolution()
    VIDCore->SetSettingValue(VDP_SETTING_RESOLUTION_MODE, resolution_mode);
 }
 
+#if defined(TRACE_INTERP_PC)
+/* Debug-only: dumps a frameN.png (current HW-render framebuffer content,
+ * whatever is bound - not colorspace/orientation-corrected, just enough to
+ * see what the interpreter had on screen) paired with a frameN.txt (the new
+ * PC addresses the interpreter saw this frame) whenever TraceFrameAddrCount()
+ * is nonzero. Directory must already exist. */
+#define TRACE_FRAME_DIR "/mnt/jhonatanteixeira/Novo volume/projects/jhon/dreams/dArkOSRE-R36/resources/github/yabassanshiro-audiofix/traces/frames"
+
+static void TraceFrameDumpAndReset(int width, int height)
+{
+   char png_path[PATH_MAX];
+   char txt_path[PATH_MAX];
+   int count = TraceFrameAddrCount();
+   int i;
+   FILE *fp;
+
+   if (width > 0 && height > 0)
+   {
+      uint32_t *pixels = (uint32_t*)malloc((size_t)width * height * sizeof(uint32_t));
+      if (pixels)
+      {
+         GLint prev_fbo = 0;
+         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+         glBindFramebuffer(GL_FRAMEBUFFER, YuiGetFB());
+         glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
+         glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo);
+
+         snprintf(png_path, sizeof(png_path), "%s/frame%llu.png", TRACE_FRAME_DIR, (unsigned long long)YabTraceFrameCounter);
+         rpng_save_image_argb(png_path, pixels, (unsigned)width, (unsigned)height, (unsigned)width * sizeof(uint32_t));
+         free(pixels);
+      }
+   }
+
+   snprintf(txt_path, sizeof(txt_path), "%s/frame%llu.txt", TRACE_FRAME_DIR, (unsigned long long)YabTraceFrameCounter);
+   fp = fopen(txt_path, "w");
+   if (fp)
+   {
+      for (i = 0; i < count; i++)
+         fprintf(fp, "%08X\n", TraceFrameAddr(i));
+      fclose(fp);
+   }
+
+   TraceFrameReset();
+}
+#endif
+
 void YuiSwapBuffers(void)
 {
    int prev_game_width = game_width;
@@ -591,6 +646,10 @@ void YuiSwapBuffers(void)
    if ((prev_game_width != game_width) || (prev_game_height != game_height))
       retro_set_resolution();
    audio_size = soundlen;
+#if defined(TRACE_INTERP_PC)
+   if (TraceFrameAddrCount() > 0)
+      TraceFrameDumpAndReset(current_width, current_height);
+#endif
    video_cb(RETRO_HW_FRAME_BUFFER_VALID, current_width, current_height, 0);
    one_frame_rendered = true;
 }

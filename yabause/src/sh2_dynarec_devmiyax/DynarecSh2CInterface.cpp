@@ -201,12 +201,13 @@ void FASTCALL SH2DynExec(SH2_struct *context, u32 cycles){
    * once the nested call returned, and corrupted the outer core's
    * memcycle_ bookkeeping (memSetByte/Word/Long read CurrentContext-
    * >memcycle_ after the write that can trigger the reentrant call).
-   * This was already wrong single-threaded; thread_local alone doesn't
-   * fix it since the clobber happens within one thread's own nested call. */
-  DynarecSh2* prevContext = DynarecSh2::CurrentContext;
+   * This was already wrong single-threaded; per-thread storage alone
+   * doesn't fix it since the clobber happens within one thread's own
+   * nested call. */
+  DynarecSh2* prevContext = DynarecSh2::CurrentContext();
   pctx->SetCurrentContext();
   pctx->ExecuteCount(cycles);
-  DynarecSh2::CurrentContext = prevContext;
+  DynarecSh2::SetCurrentContextRaw(prevContext);
 }
 
 void SH2DynSendInterrupt(SH2_struct *context, u8 vector, u8 level){
@@ -421,7 +422,7 @@ void memSetByte(u32 addr , u8 data )
   case 0x00200000:
     block->LookupTableLow[  (addr&0x000FFFFF)>>1 ] = NULL;
     T2WriteByte(LowWram, addr & 0xFFFFF, data);
-    if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 7;
+    if (addr & 0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 7;
     dynaFree();
     return;
     break;
@@ -433,7 +434,7 @@ void memSetByte(u32 addr , u8 data )
     block->LookupTable[ (addr&0x000FFFFF)>>1 ] = NULL;
 #endif
     T2WriteByte(HighWram, addr & 0xFFFFF, data);
-    if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 2;
+    if (addr & 0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 2;
     dynaFree();
     return;
     break;
@@ -446,7 +447,7 @@ void memSetByte(u32 addr , u8 data )
     }
   }
   MappedMemoryWriteByte(addr, data, &cycle);
-  DynarecSh2::CurrentContext->memcycle_ += cycle;
+  DynarecSh2::CurrentContext()->memcycle_ += cycle;
   dynaFree();
 }
 
@@ -463,7 +464,7 @@ void memSetWord(u32 addr, u16 data )
    case 0x00200000:
     block->LookupTableLow[ (addr&0x000FFFFF)>>1 ] = NULL;
     T2WriteWord(LowWram, addr & 0xFFFFF, data);
-    if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 7;
+    if (addr & 0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 7;
     dynaFree();
     return;
     break;
@@ -475,7 +476,7 @@ void memSetWord(u32 addr, u16 data )
      block->LookupTable[(addr & 0x000FFFFF) >> 1] = NULL;
 #endif
     T2WriteWord(HighWram, addr & 0xFFFFF, data);
-    if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 2;
+    if (addr & 0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 2;
     dynaFree();
     return;
    }
@@ -488,7 +489,7 @@ void memSetWord(u32 addr, u16 data )
     }
   }
   MappedMemoryWriteWord(addr, data, &cycle);
-  DynarecSh2::CurrentContext->memcycle_ += cycle;
+  DynarecSh2::CurrentContext()->memcycle_ += cycle;
   dynaFree();
 }
 
@@ -506,7 +507,7 @@ void memSetLong(u32 addr , u32 data )
     block->LookupTableLow[ (addr & 0x000FFFFF)>>1  ] = NULL;
     block->LookupTableLow[ ((addr & 0x000FFFFF)>>1) + 1 ] = NULL;
     T2WriteLong(LowWram, addr & 0xFFFFF, data);
-    if(addr&0x20000000) DynarecSh2::CurrentContext->memcycle_ += 7;
+    if(addr&0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 7;
     dynaFree();
     return;
     break;
@@ -520,7 +521,7 @@ void memSetLong(u32 addr , u32 data )
     block->LookupTable[((addr & 0x000FFFFF) >> 1) + 1] = NULL;
 #endif
     T2WriteLong(HighWram, addr & 0xFFFFF, data);
-    if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 2;
+    if (addr & 0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 2;
     dynaFree();
     return;
     break;
@@ -533,7 +534,7 @@ void memSetLong(u32 addr , u32 data )
     }
   }
   MappedMemoryWriteLong(addr, data, &cycle);
-  DynarecSh2::CurrentContext->memcycle_ += cycle;
+  DynarecSh2::CurrentContext()->memcycle_ += cycle;
   dynaFree();
 }
 
@@ -548,20 +549,20 @@ u8 memGetByte(u32 addr)
     // Low Memory
   case 0x00200000:
     val = T2ReadByte(LowWram, addr & 0xFFFFF);
-    if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 4;
+    if (addr & 0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 4;
     dynaFree();
     return val;
     break;
     // High Memory
   case 0x06000000:
     val = T2ReadByte(HighWram, addr & 0xFFFFF);
-    if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 2;
+    if (addr & 0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 2;
     dynaFree();
     return val;
     break;
   }
   val = MappedMemoryReadByte(addr, &cycle);
-  DynarecSh2::CurrentContext->memcycle_ += cycle;
+  DynarecSh2::CurrentContext()->memcycle_ += cycle;
   dynaFree();
   return val;
 }
@@ -577,20 +578,20 @@ u16 memGetWord(u32 addr)
   // Low Memory
   case 0x00200000:
     val = T2ReadWord(LowWram, addr & 0xFFFFF);
-    if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 4;
+    if (addr & 0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 4;
     dynaFree();
     return val;
     break;
     // High Memory
   case 0x06000000:
     val = T2ReadWord(HighWram, addr & 0xFFFFF);
-    if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 2;
+    if (addr & 0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 2;
     dynaFree();
     return val;
     break;
   }
   val = MappedMemoryReadWord(addr, &cycle);
-  DynarecSh2::CurrentContext->memcycle_ += cycle;
+  DynarecSh2::CurrentContext()->memcycle_ += cycle;
   dynaFree();
   return val;
 }
@@ -605,20 +606,20 @@ u32 memGetLong(u32 addr)
   // Low Memory
   case 0x00200000:
     val = T2ReadLong(LowWram, addr & 0xFFFFF);
-    if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 4;
+    if (addr & 0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 4;
     dynaFree();
     return val;
     break;
     // High Memory
   case 0x06000000:
     val = T2ReadLong(HighWram, addr & 0xFFFFF);
-    if (addr & 0x20000000) DynarecSh2::CurrentContext->memcycle_ += 2;
+    if (addr & 0x20000000) DynarecSh2::CurrentContext()->memcycle_ += 2;
     dynaFree();
     return val;
     break;
   }
   val = MappedMemoryReadLong(addr, &cycle);
-  DynarecSh2::CurrentContext->memcycle_ += cycle;
+  DynarecSh2::CurrentContext()->memcycle_ += cycle;
   dynaFree();
   return val;
 }
@@ -654,7 +655,7 @@ int DelayEachClock() {
 
 int DebugDelayClock() {
   dynaLock();
-  DynaCheckBreakPoint(DynarecSh2::CurrentContext->GET_PC());
+  DynaCheckBreakPoint(DynarecSh2::CurrentContext()->GET_PC());
   dynaFree();
   return 0;
 }
@@ -665,38 +666,38 @@ int DebugEachClock() {
   #define INSTRUCTION_B(x) ((x & 0x0F00) >> 8)
   #define INSTRUCTION_C(x) ((x & 0x00F0) >> 4)
 
-  //printf("PC:%08X\n",DynarecSh2::CurrentContext->GET_PC());
+  //printf("PC:%08X\n",DynarecSh2::CurrentContext()->GET_PC());
 
 #if 0
-  u32 pc = DynarecSh2::CurrentContext->GET_PC();
+  u32 pc = DynarecSh2::CurrentContext()->GET_PC();
   u16 inst = memGetWord(pc);
   s32 m = INSTRUCTION_C(inst);
   s32 n = INSTRUCTION_B(inst);
 
   LOG("%08X: rotcrout R%d=%08X, SR=%08X\n", 
-    DynarecSh2::CurrentContext->GET_PC(), 
-    n,DynarecSh2::CurrentContext->GetGenRegPtr()[n], 
-    DynarecSh2::CurrentContext->GET_SR());
+    DynarecSh2::CurrentContext()->GET_PC(), 
+    n,DynarecSh2::CurrentContext()->GetGenRegPtr()[n], 
+    DynarecSh2::CurrentContext()->GET_SR());
 #endif
 
 #if 0  
   LOG("%08X: subc R%d=%08X R%d=%08X SR=%08X\n", 
-    DynarecSh2::CurrentContext->GET_PC(), 
-    m,DynarecSh2::CurrentContext->GetGenRegPtr()[m], 
-    n,DynarecSh2::CurrentContext->GetGenRegPtr()[n], 
-    DynarecSh2::CurrentContext->GET_SR());
+    DynarecSh2::CurrentContext()->GET_PC(), 
+    m,DynarecSh2::CurrentContext()->GetGenRegPtr()[m], 
+    n,DynarecSh2::CurrentContext()->GetGenRegPtr()[n], 
+    DynarecSh2::CurrentContext()->GET_SR());
 #endif
 
 #if 0
-if( DynarecSh2::CurrentContext->GET_PC() >= 0x0602E3C2 &&  DynarecSh2::CurrentContext->GET_PC() < 0x0602E468 ) {
-   u32 addrn = DynarecSh2::CurrentContext->GetGenRegPtr()[6]-4;
-   u32 addrm = DynarecSh2::CurrentContext->GetGenRegPtr()[7]-4;
+if( DynarecSh2::CurrentContext()->GET_PC() >= 0x0602E3C2 &&  DynarecSh2::CurrentContext()->GET_PC() < 0x0602E468 ) {
+   u32 addrn = DynarecSh2::CurrentContext()->GetGenRegPtr()[6]-4;
+   u32 addrm = DynarecSh2::CurrentContext()->GetGenRegPtr()[7]-4;
    printf("%08X: MACL R[%d]=%08X@%08X,R[%d]=%08X@%08X,MACH=%08X,MACL=%08X\n",
-      DynarecSh2::CurrentContext->GET_PC(),
+      DynarecSh2::CurrentContext()->GET_PC(),
       6,addrn,MappedMemoryReadLong(addrn),
       7,addrm,MappedMemoryReadLong(addrm),
-      DynarecSh2::CurrentContext->GET_MACH(),
-      DynarecSh2::CurrentContext->GET_MACL()
+      DynarecSh2::CurrentContext()->GET_MACH(),
+      DynarecSh2::CurrentContext()->GET_MACL()
    );
 }
 #endif
@@ -705,41 +706,41 @@ if( DynarecSh2::CurrentContext->GET_PC() >= 0x0602E3C2 &&  DynarecSh2::CurrentCo
   #define INSTRUCTION_B(x) ((x & 0x0F00) >> 8)
   #define INSTRUCTION_C(x) ((x & 0x00F0) >> 4)
 
-  u32 pc = DynarecSh2::CurrentContext->GET_PC();
+  u32 pc = DynarecSh2::CurrentContext()->GET_PC();
   u16 inst = memGetWord(pc);
   s32 m = INSTRUCTION_C(inst);
   s32 n = INSTRUCTION_B(inst);
   printf("%08X: DIV0S %04X R[%d]:%08X,R[%d]:%08X,SR:%08X\n", 
-    DynarecSh2::CurrentContext->GET_PC(), 
+    DynarecSh2::CurrentContext()->GET_PC(), 
     inst,
-    m,DynarecSh2::CurrentContext->GetGenRegPtr()[m], 
-    n,DynarecSh2::CurrentContext->GetGenRegPtr()[n], 
-    DynarecSh2::CurrentContext->GET_SR());
+    m,DynarecSh2::CurrentContext()->GetGenRegPtr()[m], 
+    n,DynarecSh2::CurrentContext()->GetGenRegPtr()[n], 
+    DynarecSh2::CurrentContext()->GET_SR());
 #endif
 
 #if 0
-u32 pc = DynarecSh2::CurrentContext->GET_PC();
+u32 pc = DynarecSh2::CurrentContext()->GET_PC();
 if( pc == 0x060133C8 ) {
   u16 inst = memGetWord(pc);
   s32 m = INSTRUCTION_C(inst);
   s32 n = INSTRUCTION_B(inst);
   printf("%08X: DIV1(O) m:%08X,n:%08X,SR:%08X\n", 
-    DynarecSh2::CurrentContext->GET_PC(), 
-    DynarecSh2::CurrentContext->GetGenRegPtr()[m], 
-    DynarecSh2::CurrentContext->GetGenRegPtr()[n], 
-    DynarecSh2::CurrentContext->GET_SR());
+    DynarecSh2::CurrentContext()->GET_PC(), 
+    DynarecSh2::CurrentContext()->GetGenRegPtr()[m], 
+    DynarecSh2::CurrentContext()->GetGenRegPtr()[n], 
+    DynarecSh2::CurrentContext()->GET_SR());
 }
 #endif
 
 
 #ifdef DMPHISTORY
   CurrentSH2->pchistory_index++;
-  CurrentSH2->pchistory[CurrentSH2->pchistory_index & (MAX_DMPHISTORY-1) ] = DynarecSh2::CurrentContext->GET_PC();
+  CurrentSH2->pchistory[CurrentSH2->pchistory_index & (MAX_DMPHISTORY-1) ] = DynarecSh2::CurrentContext()->GET_PC();
   //CurrentSH2->regshistory[CurrentSH2->pchistory_index & 0xFF] = NULL;
 #endif
-  DynaCheckBreakPoint(DynarecSh2::CurrentContext->GET_PC());
+  DynaCheckBreakPoint(DynarecSh2::CurrentContext()->GET_PC());
 
-  if (DynarecSh2::CurrentContext->CheckOneStep()){
+  if (DynarecSh2::CurrentContext()->CheckOneStep()){
     dynaFree();
     return 1;
   }
@@ -750,7 +751,7 @@ if( pc == 0x060133C8 ) {
   
 int EachClock() {
   dynaLock();
-  if (DynarecSh2::CurrentContext->CheckInterupt()) {
+  if (DynarecSh2::CurrentContext()->CheckInterupt()) {
       dynaFree();
       return 1;
   }

@@ -126,6 +126,12 @@ extern void SH2HandleInterrupts(SH2_struct *context);
 yabsys_struct yabsys;
 const char *bupfilename = NULL;
 u64 tickfreq;
+#if defined(TRACE_INTERP_PC)
+/* Incremented once per completed frame (VBlankOUT, below) - read by
+ * sh2int.c's TRACE_INTERP_PC block to group its "first time this PC was
+ * ever seen" log entries under a "=== Frame N ===" header. */
+u64 YabTraceFrameCounter = 0;
+#endif
 //todo this ought to be in scspdsp.c
 ScspDsp scsp_dsp = { 0 };
 char ssf_track_name[256] = { 0 };
@@ -748,10 +754,10 @@ int YabauseEmulate(void) {
    SH2OnFrame(SSH2);
    u64 cpu_emutime = 0;
 #if defined(YAB_SH2_SLAVE_WORKER)
-   /* Accumulates this scanline's worth of Slave cycles across all ~10
-    * decilines, so we hand the worker ONE bigger job per scanline instead
-    * of posting (and paying a wake-up) on every single deciline. Reset to
-    * 0 right after each scanline's flush, below. */
+   /* Accumulates the WHOLE FRAME's worth of Slave cycles (every scanline's
+    * decilines), so we hand the worker ONE job per frame instead of once
+    * per scanline or once per deciline. Flushed at VBlankIN, below - see
+    * the comment there for why that's still safe. Reset to 0 right after. */
    u32 sh2_slave_cycle_batch = 0;
 #endif
    while (!oneframeexec)
@@ -844,40 +850,53 @@ int YabauseEmulate(void) {
          PROFILE_START("SCSP");
          ScspExec();
          PROFILE_STOP("SCSP");
-#if defined(YAB_SH2_SLAVE_WORKER)
-         /* Post this whole scanline's accumulated Slave cycles as ONE job,
-          * then catch up on it - same granularity as SoundWorkerBarrier()
-          * above. Posting once per scanline instead of once per deciline
-          * cuts the worker wake-up count from ~2600/frame to ~260/frame;
-          * see sh2_slave_worker.h for the measured cost that made this
-          * worthwhile.
-          *
-          * Gated on IsSSH2Running, unlike ScuDspWorkerBarrier() below: the
-          * SH2 Slave dispatcher is only Start()'ed inside YabauseStartSlave()
-          * (when a game issues SSHON), not unconditionally at core init like
-          * the DSP worker is. Calling Barrier() while it was never started
-          * queues the wait-job with no worker thread ever going to run it -
-          * CallVoid()'s fut.wait() then blocks forever. Most games begin
-          * with the Slave off, so an unguarded call here hung on literally
-          * the first scanline of emulation. */
-         if (yabsys.IsSSH2Running) {
-           if (sh2_slave_cycle_batch > 0)
-             Sh2SlaveWorkerPostExec(SH2Exec, SSH2, sh2_slave_cycle_batch);
-           Sh2SlaveWorkerBarrier();
-         }
-         sh2_slave_cycle_batch = 0;
-#endif
-#if defined(YAB_SCU_DSP_WORKER)
-         /* Same batching idea for the SCU DSP - ScuDspFlushAndBarrier()
-          * posts this scanline's accumulated DSP cycles as one job (see
-          * scu.c) then waits, instead of posting on every deciline. */
-         ScuDspFlushAndBarrier();
-#endif
          yabsys.DecilineCount = 0;
          yabsys.LineCount++;
 
          if (yabsys.LineCount == yabsys.VBlankLineCount) {
 
+#if defined(YAB_SH2_SLAVE_WORKER)
+            /* Flush the WHOLE FRAME's worth of accumulated Slave cycles as
+             * one job, once, here, instead of once per scanline (~260x/frame).
+             * A PC test run initially blamed this exact change for a 60->55fps
+             * regression (2026-08-03); a 4-commit git-history bisection on the
+             * same PC/ROM later proved that regression was unrelated to this
+             * code - every commit tested, including ones from before the SH2
+             * Slave/SCU DSP worker threads existed at all, showed the same
+             * ~55fps ceiling. Root cause: this PC's audio server is PipeWire's
+             * PulseAudio-compat shim (`pactl info` -> "PulseAudio (on
+             * PipeWire...)"), running in a sandboxed display environment
+             * without real-time scheduling guarantees - a host-environment
+             * audio-timing artifact, not a code regression. See git log for
+             * the bisection. This is safe because the actual VDP1/VDP2 render
+             * pass (VIDCore->Vdp2DrawScreens() / Vdp1DrawEnd(), inside
+             * vdp2VBlankOUT() in vdp2.cpp) doesn't run until
+             * yabsys.LineCount == MaxLineCount - strictly later than this
+             * point - so the Slave's full-frame work is guaranteed complete
+             * and visible before anything reads VRAM/registers to render.
+             * The FRT input-capture cross-trigger stays correct regardless
+             * of batch size: it's protected by g_sh2_exec_mtx
+             * (sh2_slave_worker.cpp), not by how often we barrier here.
+             *
+             * The remaining real risk (untested, not provable from static
+             * analysis): a game using its OWN ad-hoc shared-RAM handshake
+             * between Master and Slave mid-frame (distinct from the FRT
+             * mechanism) could observe stale Slave state for one frame.
+             * Reversible via git if it surfaces. */
+            if (yabsys.IsSSH2Running) {
+              if (sh2_slave_cycle_batch > 0)
+                Sh2SlaveWorkerPostExec(SH2Exec, SSH2, sh2_slave_cycle_batch);
+              Sh2SlaveWorkerBarrier();
+            }
+            sh2_slave_cycle_batch = 0;
+#endif
+#if defined(YAB_SCU_DSP_WORKER)
+            /* Same reasoning as the Slave flush above - once per frame,
+             * still strictly before vdp2VBlankOUT()'s render pass (which is
+             * what actually consumes DSP-computed transform data via VDP1
+             * draw commands). */
+            ScuDspFlushAndBarrier();
+#endif
 #if defined(ASYNC_SCSP)
             setM68kCounter((u64)(44100 * 256 / 60) << SCSP_FRACTIONAL_BITS);
 #endif
@@ -898,6 +917,9 @@ int YabauseEmulate(void) {
             Vdp2VBlankOUT();
             yabsys.LineCount = 0;
             oneframeexec = 1;
+#if defined(TRACE_INTERP_PC)
+            YabTraceFrameCounter++;
+#endif
             PROFILE_STOP("VDP1/VDP2");
 
          }

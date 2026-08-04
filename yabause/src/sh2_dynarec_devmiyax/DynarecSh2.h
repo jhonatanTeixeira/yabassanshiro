@@ -21,9 +21,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 #ifndef _DYNAREC_SH2_H_
 #define _DYNAREC_SH2_H_
 
+#include <atomic>
 #include <list>
 #include <map>
 #include <mutex>
+#include <pthread.h>
 #include <string>
 #include <unordered_map>
 
@@ -225,12 +227,26 @@ public:
   Block * g_CompleBlock;
   
   u8 dsh2_instructions[MAX_INSTSIZE];
-  Block* LookupTable[0x100000>>1];    
+  /* std::atomic<Block*>, not plain Block*: Execute() below does an
+   * unlocked speculative read of these tables on the hot path (every
+   * single block dispatch - this runs far more often than cache_mtx_'s
+   * other, rare use, compiling a brand-new block) and only takes the lock
+   * on an actual cache miss. On ARM's weak memory model, an unsynchronized
+   * plain-pointer read racing a plain-pointer write gives no guarantee the
+   * reader also sees the pointed-to Block's fields fully written (the
+   * store to the table and the stores that build the Block can be
+   * observed out of order) - unlike x86, this is a real risk here, not a
+   * theoretical one, since ARM is the only target that actually compiles
+   * this dynarec (DYNAREC_DEVMIYAX). std::atomic<Block*> with its default
+   * (sequentially consistent) load/store keeps the existing plain
+   * assignment syntax working unchanged while making both the pointer
+   * publication and the fast-path read safe. */
+  std::atomic<Block*> LookupTable[0x100000>>1];
   //addrs LookupParentTable[0x100000>>1];
   addrs * LookupParentTable;
-  Block* LookupTableRom[0x80000>>1];
-  Block* LookupTableLow[0x100000>>1];
-  Block* LookupTableC[0x8000>>1];
+  std::atomic<Block*> LookupTableRom[0x80000>>1];
+  std::atomic<Block*> LookupTableLow[0x100000>>1];
+  std::atomic<Block*> LookupTableC[0x8000>>1];
   Block * dCode;
   
   std::unordered_map<u32, int> self_modify_block;
@@ -253,15 +269,18 @@ public:
     addr = adress_mask(addr);
     if (LookupParentTable[addr].size() == 0) return;
     for (auto it = LookupParentTable[addr].begin(); it != LookupParentTable[addr].end(); it++) {
-      if (LookupTable[*it] != NULL) {
-        for (u32 i = adress_mask(LookupTable[*it]->b_addr) ; i <= adress_mask(LookupTable[*it]->e_addr); i++ ) {
+      /* std::atomic<Block*> has no operator->, so load once into a plain
+       * pointer - safe here, this whole function already holds cache_mtx_. */
+      Block * blk = LookupTable[*it];
+      if (blk != NULL) {
+        for (u32 i = adress_mask(blk->b_addr) ; i <= adress_mask(blk->e_addr); i++ ) {
           if (i != addr) {
             LookupParentTable[i].remove(*it);
           }
         }
-         LOG("%d %08X is removed", LookupTable[*it]->id, (*it) << 1);
+         LOG("%d %08X is removed", blk->id, (*it) << 1);
         remove_count_++;
-        self_modify_block[ (((*it) << 1) | 0x06000000) ] = LookupTable[*it]->id;
+        self_modify_block[ (((*it) << 1) | 0x06000000) ] = blk->id;
         LookupTable[*it] = NULL;
       }
     }
@@ -327,12 +346,42 @@ protected:
 public:
   DynarecSh2();
   ~DynarecSh2();
-  /* thread_local, not a plain static: Master and Slave each get their own
-   * "which context is running on me right now" when they run on separate
-   * OS threads (sh2_slave_worker.cpp) instead of sharing one global that
-   * only ever worked because there was a single execution thread. */
-  static thread_local DynarecSh2 * CurrentContext;
-  void SetCurrentContext(){ CurrentContext = this; }
+  /* Per-OS-thread "which context is running on me right now" - Master and
+   * Slave each need their own when they run on separate OS threads
+   * (sh2_slave_worker.cpp) instead of sharing one global that only ever
+   * worked because there was a single execution thread.
+   *
+   * This was originally a `thread_local DynarecSh2 *`, which is correct
+   * but was measured (see the investigation that led here) to be a severe
+   * performance regression on real ARM hardware: this dynarec is compiled
+   * into a libretro core .so, loaded via dlopen() at runtime, not linked
+   * into the process at startup. ELF thread_local variables in a dlopen'd
+   * module cannot use the cheap initial-exec/local-exec TLS models (those
+   * require the TLS block to exist before any thread is created) and fall
+   * back to general-dynamic TLSDESC - a real indirect function call on
+   * every single access. CurrentContext is read on every SH-2 memory
+   * access the JIT-compiled code performs (memGetByte/Word/Long,
+   * memSetByte/Word/Long in DynarecSh2CInterface.cpp), so that indirect
+   * call was firing potentially tens of millions of times a second.
+   *
+   * pthread_key_t sidesteps this entirely: pthread_getspecific/setspecific
+   * are plain function calls into libpthread, not ELF-TLS-relocation-
+   * based, so they cost the same whether this code is dlopen'd or not. */
+  static pthread_key_t context_key_;
+  static pthread_once_t context_key_once_;
+  static void MakeContextKey() { pthread_key_create(&context_key_, NULL); }
+  static DynarecSh2 * CurrentContext() {
+    pthread_once(&context_key_once_, &DynarecSh2::MakeContextKey);
+    return (DynarecSh2*)pthread_getspecific(context_key_);
+  }
+  /* For save/restore around reentrant calls (SH2DynExec in
+   * DynarecSh2CInterface.cpp) - sets an arbitrary previous value back,
+   * not necessarily `this`. */
+  static void SetCurrentContextRaw(DynarecSh2 * ctx) {
+    pthread_once(&context_key_once_, &DynarecSh2::MakeContextKey);
+    pthread_setspecific(context_key_, ctx);
+  }
+  void SetCurrentContext(){ SetCurrentContextRaw(this); }
   void SetSlave(bool is_slave) { is_slave_ = is_slave; }
   void SetContext(SH2_struct * ctx) { ctx_= ctx;}
   bool IsSlave() { return is_slave_;  }

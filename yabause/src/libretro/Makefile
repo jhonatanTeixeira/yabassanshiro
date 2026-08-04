@@ -24,6 +24,7 @@ YAB_SCSP_WORKER = 0
 YAB_VDP_WORKER = 0
 YAB_SH2_SLAVE_WORKER = 0
 YAB_SCU_DSP_WORKER = 0
+TRACE_INTERP_PC = 0
 
 ifeq ($(platform),)
 	platform = unix
@@ -467,6 +468,13 @@ endif
 # moves. Off by default.
 ifeq ($(YAB_SCU_DSP_WORKER), 1)
 	FLAGS += -DYAB_SCU_DSP_WORKER
+endif
+
+# Existing debug tracing (added 2026-07-04, sh2int.c) - logs every PC the
+# Master SH-2 interpreter fetches an instruction from, to
+# /tmp/interp_pc_trace.log, capped at 3M lines. Off by default.
+ifeq ($(TRACE_INTERP_PC), 1)
+	FLAGS += -DTRACE_INTERP_PC
 endif
 
 ifeq ($(__USE_OPENGL_DEBUG__),1)

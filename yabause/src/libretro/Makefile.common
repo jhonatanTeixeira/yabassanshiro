@@ -179,6 +179,18 @@ else
 	endif
 endif
 
+ifeq ($(TRACE_INTERP_PC), 1)
+	FLAGS += -DHAVE_ZLIB=1
+	SOURCES_C += $(LIBRETRO_COMM_DIR)/streams/trans_stream.c \
+		$(LIBRETRO_COMM_DIR)/streams/trans_stream_zlib.c \
+		$(LIBRETRO_COMM_DIR)/streams/trans_stream_pipe.c \
+		$(LIBRETRO_COMM_DIR)/formats/png/rpng_encode.c \
+		$(LIBRETRO_COMM_DIR)/encodings/encoding_crc32.c \
+		$(LIBRETRO_COMM_DIR)/string/stdstring.c \
+		$(ZLIB_DIR)/deflate.c \
+		$(ZLIB_DIR)/trees.c
+endif
+
 SOURCES_CXX := $(SOURCE_DIR)/Counter.cpp \
 	$(SOURCE_DIR)/sound_worker.cpp \
 	$(SOURCE_DIR)/vdp_worker.cpp \
