@@ -18,6 +18,7 @@ ARCH_IS_WINDOWS = 0
 FORCE_GLEW = 0
 HAVE_SYS_PARAM_H = 1
 HAVE_FSEEKO = 0
+PORTAL_TRACE = 0
 
 ifeq ($(platform),)
 	platform = unix
@@ -423,6 +424,13 @@ endif
 
 include Makefile.common
 
+# Structured real-time JSONL trace (portal_trace.h/.c) - logs calls (with
+# resolved JSR/JMP/BRAF/BSRF/BSR targets + register snapshot), returns, and
+# hardware register writes (VDP1/VDP2/SCU/SMPC) to $PORTAL_TRACE_PATH (or
+# /tmp/portal_trace.jsonl). Off by default.
+ifeq ($(PORTAL_TRACE), 1)
+	FLAGS += -DPORTAL_TRACE
+endif
 ifeq ($(__USE_OPENGL_DEBUG__),1)
 	FLAGS += -D__USE_OPENGL_DEBUG__
 endif
