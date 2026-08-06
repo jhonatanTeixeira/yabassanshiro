@@ -41,6 +41,8 @@ extern u32 TraceFrameAddr(int i);
 extern void TraceFrameReset(void);
 #endif
 
+#include "portal_trace.h"
+
 yabauseinit_struct yinit;
 
 static char slash = path_default_slash_c();
@@ -1006,6 +1008,28 @@ static void extract_basename(char *buf, const char *path, size_t size)
       *ext = '\0';
 }
 
+/* F9 toggles portal_trace capture on/off (see portal_trace.c's
+ * PortalTraceToggleCapture for the exact semantics: stop finalizes the
+ * current recording segment, start begins a brand new one). Registered
+ * unconditionally in retro_init() below - PortalTraceToggleCapture() is a
+ * no-op macro when built without PORTAL_TRACE=1, so this is harmless in a
+ * normal build, just an unused hotkey. Rising-edge only: the frontend can
+ * call this repeatedly while a key is held, so track the previous state
+ * and only act on the down-transition, not every callback invocation. */
+static void portal_trace_keyboard_event(bool down, unsigned keycode,
+      uint32_t character, uint16_t key_modifiers)
+{
+   static bool f9_was_down = false;
+   (void)character;
+   (void)key_modifiers;
+   if (keycode == RETROK_F9)
+   {
+      if (down && !f9_was_down)
+         PortalTraceToggleCapture();
+      f9_was_down = down;
+   }
+}
+
 void retro_init(void)
 {
    struct retro_log_callback log;
@@ -1043,6 +1067,11 @@ void retro_init(void)
    environ_cb(RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL, &level);
 
    environ_cb(RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS, &serialization_quirks);
+
+   {
+      struct retro_keyboard_callback kb_cb = { portal_trace_keyboard_event };
+      environ_cb(RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK, &kb_cb);
+   }
 }
 
 bool retro_load_game_common()

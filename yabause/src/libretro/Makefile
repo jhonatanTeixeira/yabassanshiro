@@ -25,6 +25,7 @@ YAB_VDP_WORKER = 0
 YAB_SH2_SLAVE_WORKER = 0
 YAB_SCU_DSP_WORKER = 0
 TRACE_INTERP_PC = 0
+PORTAL_TRACE = 0
 
 ifeq ($(platform),)
 	platform = unix
@@ -475,6 +476,14 @@ endif
 # /tmp/interp_pc_trace.log, capped at 3M lines. Off by default.
 ifeq ($(TRACE_INTERP_PC), 1)
 	FLAGS += -DTRACE_INTERP_PC
+endif
+
+# Structured real-time JSONL trace (portal_trace.h/.c) - logs calls (with
+# resolved JSR/JMP/BRAF/BSRF/BSR targets + register snapshot), returns, and
+# hardware register writes (VDP1/VDP2/SCU/SMPC) to $PORTAL_TRACE_PATH (or
+# /tmp/portal_trace.jsonl). Off by default.
+ifeq ($(PORTAL_TRACE), 1)
+	FLAGS += -DPORTAL_TRACE
 endif
 
 ifeq ($(__USE_OPENGL_DEBUG__),1)

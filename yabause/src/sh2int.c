@@ -45,6 +45,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 #include <string.h>
 #include "sh2core.h"
 #include "sh2int.h"
+#include "portal_trace.h"
 #include "sh2idle.h"
 #include "cs0.h"
 #include "debug.h"
@@ -3220,6 +3221,35 @@ FASTCALL void SH2InterpreterExec(SH2_struct *context, u32 cycles)
       if (context == MSH2 && TraceMarkSeen(context->regs.PC)) {
         if (s_trace_frame_addr_count < TRACE_FRAME_MAX_ADDRS)
           s_trace_frame_addrs[s_trace_frame_addr_count++] = context->regs.PC;
+      }
+#endif
+
+#if defined(PORTAL_TRACE)
+      /* Opcode-family test kept fully inline (mirrors TraceMarkSeen() right
+       * above, which is `static` in this same TU and gets inlined away by
+       * the compiler) - crossing into portal_trace.c's PortalTraceLogCall
+       * unconditionally on *every* instruction, rather than only on a
+       * confirmed match, was proven by bisection to add enough per-
+       * instruction overhead to desync CD-block read-latency emulation and
+       * keep the game stuck on a black loading screen. See the comment on
+       * PortalTraceLogCall's definition in portal_trace.c. */
+      if (context == MSH2) {
+        u16 op = context->instruction;
+        if ((op & 0xF0FF) == 0x400B) { /* JSR @Rn */
+          PortalTraceLogCall(context->regs.PC, context->regs.R[(op & 0x0F00) >> 8], "JSR");
+        } else if ((op & 0xF0FF) == 0x402B) { /* JMP @Rn */
+          PortalTraceLogCall(context->regs.PC, context->regs.R[(op & 0x0F00) >> 8], "JMP");
+        } else if ((op & 0xF0FF) == 0x0023) { /* BRAF Rn */
+          PortalTraceLogCall(context->regs.PC, context->regs.PC + context->regs.R[(op & 0x0F00) >> 8] + 4, "BRAF");
+        } else if ((op & 0xF0FF) == 0x0003) { /* BSRF Rn */
+          PortalTraceLogCall(context->regs.PC, context->regs.PC + context->regs.R[(op & 0x0F00) >> 8] + 4, "BSRF");
+        } else if ((op & 0xF000) == 0xB000) { /* BSR disp12 */
+          s32 disp = (s32)(op & 0x0FFF);
+          if (disp & 0x800) disp |= 0xFFFFF000;
+          PortalTraceLogCall(context->regs.PC, context->regs.PC + (u32)(disp << 1) + 4, "BSR");
+        } else if (op == 0x000B || op == 0x002B) { /* RTS / RTE */
+          PortalTraceReturn();
+        }
       }
 #endif
 
