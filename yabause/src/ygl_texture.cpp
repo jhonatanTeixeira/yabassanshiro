@@ -26,6 +26,8 @@ extern "C"{
 extern vdp2rotationparameter_struct  paraA;
 extern vdp2rotationparameter_struct  paraB;
 extern Vdp2 * fixVdp2Regs;
+/* Defined in vidogl.c - see the snapshot in Vdp2DrawRBG0. */
+extern u8 g_Vdp2RamDirtyForRbg;
 }
 
 // Compute shaders require GLES 3.1+ or GL 4.3+.
@@ -2508,10 +2510,17 @@ public:
 
   glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo_vram_);
   //glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 0x80000, (void*)Vdp2Ram);
-  if(mapped_vram == nullptr) mapped_vram = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 0x80000, GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
-  memcpy(mapped_vram, Vdp2Ram, 0x80000);
-  glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
-  mapped_vram = nullptr;
+  /* Skip re-uploading the whole 512KB of VDP2 VRAM on frames where nothing
+   * wrote to it. g_Vdp2RamDirtyForRbg is snapshotted from the A0/A1/B0/B1
+   * write flags in Vdp2DrawRBG0 just before they're cleared. Over-copying on
+   * a false positive is harmless; the flags are only ever OR'd in by the
+   * VRAM write handlers, so they cannot produce a false negative. */
+  if (g_Vdp2RamDirtyForRbg) {
+    if(mapped_vram == nullptr) mapped_vram = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, 0x80000, GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+    memcpy(mapped_vram, Vdp2Ram, 0x80000);
+    glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+    mapped_vram = nullptr;
+  }
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssbo_vram_);
   ErrorHandle("glBindBufferBase");
 	

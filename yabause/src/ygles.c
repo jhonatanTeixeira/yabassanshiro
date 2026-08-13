@@ -496,6 +496,8 @@ YglTextureManager * YglTMInit(unsigned int w, unsigned int h) {
   tm->width = w;
   tm->height = h;
   tm->current = 0;
+  tm->dirty_y0 = ~0u;   /* empty range: nothing written yet */
+  tm->dirty_y1 = 0;
 
   YglTMReset(tm);
 
@@ -562,6 +564,10 @@ void YglTMReset(YglTextureManager * tm  ) {
   tm->currentX = 0;
   tm->currentY = 0;
   tm->yMax = 0;
+  /* Everything is about to be re-decoded from scratch, so the whole atlas is
+   * conceptually dirty; leave the range as-is (it will be widened by the
+   * YglTMAllocate calls that follow) rather than clearing it, so a reset
+   * frame still uploads exactly the rows it rewrites. */
 }
 
 #if 0
@@ -585,7 +591,18 @@ void YglTmPush(YglTextureManager * tm){
   if (tm->texture != NULL ) {
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, tm->pixelBufferID_in[tm->current] );
     glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tm->width, tm->yMax, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+    /* Upload only the rows written since the last push (see dirty_y0/dirty_y1
+     * in ygl.h). The last arg is a byte offset into the PBO, so it has to be
+     * advanced to match the starting row. */
+    if (tm->dirty_y1 > tm->dirty_y0) {
+      glTexSubImage2D(GL_TEXTURE_2D, 0,
+                      0, tm->dirty_y0,
+                      tm->width, tm->dirty_y1 - tm->dirty_y0,
+                      GL_RGBA, GL_UNSIGNED_BYTE,
+                      (const void *)(uintptr_t)((size_t)tm->dirty_y0 * tm->width * 4));
+    }
+    tm->dirty_y0 = ~0u;
+    tm->dirty_y1 = 0;
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
     tm->texture = NULL;
   }
@@ -730,6 +747,11 @@ void YglTMAllocate(YglTextureManager * tm, YglTexture * output, unsigned int w, 
     if ((tm->currentY + h) > tm->yMax){
       tm->yMax = tm->currentY + h;
     }
+
+    /* Track the rows this allocation will be written into, so YglTmPush()
+     * can upload only what changed instead of [0, yMax). */
+    if (tm->currentY < tm->dirty_y0) tm->dirty_y0 = tm->currentY;
+    if ((tm->currentY + h) > tm->dirty_y1) tm->dirty_y1 = tm->currentY + h;
    } else {
      tm->currentX = 0;
      tm->currentY = tm->yMax;

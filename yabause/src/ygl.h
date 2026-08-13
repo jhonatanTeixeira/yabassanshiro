@@ -266,10 +266,23 @@ typedef struct {
 	unsigned int currentX;
 	unsigned int currentY;
 	unsigned int yMax;
+	/* Row range actually written since the last YglTmPush(). yMax used to be
+	 * a safe upload bound only because YglTMReset() zeroed it every frame;
+	 * now that the atlas can survive across frames (see the content_dirty
+	 * gate in VIDOGLVdp2DrawStart) yMax is a permanent high-water mark, so
+	 * uploading [0,yMax) every frame re-uploads the whole atlas even when
+	 * nothing changed - handing back the decode savings as upload cost.
+	 * dirty_y0 >= dirty_y1 means "nothing written, skip the upload". */
+	unsigned int dirty_y0;
+	unsigned int dirty_y1;
 	unsigned int * texture;
 	unsigned int width;
 	unsigned int height;
-	YglCacheHash *HashTable[HASHSIZE];
+	/* HASHSIZE+1, not HASHSIZE: YglgetHash() masks with & HASHSIZE (0xFFFF),
+	 * so it can legitimately return 0xFFFF - which indexed one element PAST
+	 * the end of a [HASHSIZE] array, corrupting whatever followed it in the
+	 * struct (CashLink[0].addr). Pre-existing out-of-bounds write. */
+	YglCacheHash *HashTable[HASHSIZE + 1];
 	YglCacheHash CashLink[HASHSIZE * 2];
 	u32 CashLink_index;
 

@@ -592,7 +592,10 @@ static void FASTCALL Vdp1ReadTexture(vdp1cmd_struct *cmd, YglSprite *sprite, Ygl
 
   if (/*fixVdp2Regs->SDCTL != 0 &&*/ MSB != 0) {
     MSB_SHADOW = 1;
-    _Ygl->msb_shadow_count_[_Ygl->drawframe]++;
+    /* msb_shadow_count_ is NOT incremented here any more - see the per-command
+     * increment after each Vdp1ReadCommand() in the sprite draw functions.
+     * Counting here undercounted on texture-cache hits (this function doesn't
+     * run at all then), which silently disabled the MSB-shadow pass. */
   }
 
   if((fixVdp2Regs->SPCTL & 0x10) && // Sprite Window is enabled
@@ -4637,6 +4640,11 @@ void VIDOGLVdp1NormalSpriteDraw(u8 * ram, Vdp1 * regs, u8* back_framebuffer)
 
 
   Vdp1ReadCommand(&cmd, Vdp1Regs->addr, Vdp1Ram);
+  /* MSB-shadow accounting must be per COMMAND, not per decode. Vdp1ReadTexture()
+   * is skipped entirely on a texture-cache hit, so counting inside it made the
+   * MSB-shadow pass (ygles.c:3889, gated on msb_shadow_count_) silently not run
+   * on cached frames -> sprite shadows flickering in and out. */
+  if (cmd.CMDPMOD & 0x8000) _Ygl->msb_shadow_count_[_Ygl->drawframe]++;
   if ((cmd.CMDSIZE & 0x8000)) {
     regs->EDSR |= 2;
     return; // BAD Command
@@ -4773,6 +4781,11 @@ void VIDOGLVdp1ScaledSpriteDraw(u8 * ram, Vdp1 * regs, u8* back_framebuffer)
   int i;
 
   Vdp1ReadCommand(&cmd, Vdp1Regs->addr, Vdp1Ram);
+  /* MSB-shadow accounting must be per COMMAND, not per decode. Vdp1ReadTexture()
+   * is skipped entirely on a texture-cache hit, so counting inside it made the
+   * MSB-shadow pass (ygles.c:3889, gated on msb_shadow_count_) silently not run
+   * on cached frames -> sprite shadows flickering in and out. */
+  if (cmd.CMDPMOD & 0x8000) _Ygl->msb_shadow_count_[_Ygl->drawframe]++;
   if (cmd.CMDSIZE == 0) {
     return; // BAD Command
   }
@@ -4989,6 +5002,11 @@ void VIDOGLVdp1DistortedSpriteDraw(u8 * ram, Vdp1 * regs, u8* back_framebuffer)
   int isSquare;
 
   Vdp1ReadCommand(&cmd, Vdp1Regs->addr, Vdp1Ram);
+  /* MSB-shadow accounting must be per COMMAND, not per decode. Vdp1ReadTexture()
+   * is skipped entirely on a texture-cache hit, so counting inside it made the
+   * MSB-shadow pass (ygles.c:3889, gated on msb_shadow_count_) silently not run
+   * on cached frames -> sprite shadows flickering in and out. */
+  if (cmd.CMDPMOD & 0x8000) _Ygl->msb_shadow_count_[_Ygl->drawframe]++;
   if (cmd.CMDSIZE == 0) {
     return; // BAD Command
   }
@@ -6115,6 +6133,12 @@ int VIDOGLVdp2Reset(void)
 // extern "C" there). Cleared here, below, whenever consumed.
 extern u8 g_Vdp1RamUpdated;
 
+/* Set in Vdp2DrawRBG0 from the A0/A1/B0/B1_Updated flags just before they are
+ * cleared, so RBGGenerator_update() (ygl_texture.cpp) can still tell whether
+ * VDP2 VRAM actually changed this frame. Starts at 1 so the very first frame
+ * always uploads. */
+u8 g_Vdp2RamDirtyForRbg = 1;
+
 void VIDOGLVdp2DrawStart(void)
 {
   fixVdp2Regs = Vdp2RestoreRegs(0, Vdp2Lines);
@@ -6198,9 +6222,28 @@ void VIDOGLVdp2DrawStart(void)
   int vdp2_dirty = memcmp(&prev_frame_vdp2regs, &sanitized_vdp2regs, sizeof(Vdp2)) != 0;
   if (vdp2_dirty) prev_frame_vdp2regs = sanitized_vdp2regs;
 
+  // Color RAM changes usually CANNOT invalidate the atlas: the decoders bake
+  // palette INDICES into texels, not colors (Vdp2GetPixel4/8/16bpp emit
+  // cramindex; VDP1COLOR() emits a color index), and the fragment shader
+  // resolves them against cram_tex, which YglOnUpdateColorRamWord already
+  // maintains incrementally. So a palette fade used to nuke the whole atlas
+  // every frame for nothing.
+  // The one exception is special-color-calculation mode 3: Vdp2GetAlpha()
+  // reads Vdp2ColorRamGetColorRaw() and bakes the result into the texel's
+  // alpha byte. Only invalidate on a CRAM change if some layer is actually
+  // in mode 3 (SFCCMD, 2 bits per layer: NBG0..3 at shifts 0/2/4/6, RBG0 at 8).
+  int cram_affects_texels = 0;
+  {
+    const u16 sfccmd = fixVdp2Regs->SFCCMD;
+    int shift;
+    for (shift = 0; shift <= 8; shift += 2) {
+      if (((sfccmd >> shift) & 0x3) == 3) { cram_affects_texels = 1; break; }
+    }
+  }
+
   int content_dirty =
        g_Vdp1RamUpdated || A0_Updated || A1_Updated || B0_Updated || B1_Updated
-    || Vdp2ColorRamUpdated
+    || (Vdp2ColorRamUpdated && cram_affects_texels)
     || !have_prev_frame_regs
     || vdp2_dirty || vdp1_dirty;
 
@@ -7669,6 +7712,12 @@ static void Vdp2DrawRBG0(void)
 
   Vdp2ReadRotationTable(0, &paraA, fixVdp2Regs, Vdp2Ram);
   Vdp2ReadRotationTable(1, &paraB, fixVdp2Regs, Vdp2Ram);
+  /* Snapshot before clearing: RBGGenerator_update() runs later in this same
+   * call chain (Vdp2DrawRotation -> Vdp2DrawRotation_in) and needs to know
+   * whether Vdp2Ram changed, but by then these are already 0. It uses the
+   * snapshot to skip a 512KB memcpy of the whole of Vdp2Ram to the GPU on
+   * frames where nothing was written. See docs/once_a_frame.md. */
+  g_Vdp2RamDirtyForRbg = (A0_Updated || A1_Updated || B0_Updated || B1_Updated);
   A0_Updated = 0;
   A1_Updated = 0;
   B0_Updated = 0;

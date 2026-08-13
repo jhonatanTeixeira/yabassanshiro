@@ -119,7 +119,7 @@ typedef struct
 // 100% and IS the framerate ceiling - moving audio onto it makes the critical
 // path longer and framerate worse, however good the total looks. Spare cores
 // are free real estate there; the main thread is not.
-//#define ASYNC_SCSP
+#define ASYNC_SCSP
 //#endif
 
 typedef struct
