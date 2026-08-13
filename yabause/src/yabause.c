@@ -99,7 +99,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 #ifdef SYS_PROFILE_H
  #include SYS_PROFILE_H
 #else
- #define DONT_PROFILE
+ #ifndef DONT_PROFILE
+  #define DONT_PROFILE
+ #endif
  #include "profile.h"
 #endif
 
@@ -185,8 +187,26 @@ YabEventQueue * q_scsp_finish;
 
 int YabauseInit(yabauseinit_struct *init)
 {
-  q_scsp_frame_start = YabThreadCreateQueue(1);
-  q_scsp_finish = YabThreadCreateQueue(1);
+  // Depth 2, not 1. At depth 1 these two queues form a full rendezvous every
+  // frame: the main thread cannot pass VBlankIN until the SCSP thread has
+  // finished the whole frame's audio, and the SCSP thread cannot start the
+  // next frame until the main thread releases it. Neither can ever work on
+  // frame N+1 while the other is still on frame N, so the two threads
+  // ALTERNATE instead of overlapping and the frame time becomes
+  // (main + audio) instead of max(main, audio) - measured on device as two
+  // threads pinned at a matched ~75% with two cores sitting idle, at 40fps.
+  //
+  // One slot of slack lets audio run up to a frame behind, which is what the
+  // handshake actually needs (it exists to stop audio drifting arbitrarily
+  // far, not to keep it in lock-step), and lets the two overlap properly.
+  q_scsp_frame_start = YabThreadCreateQueue(2);
+  q_scsp_finish = YabThreadCreateQueue(2);
+  // Prime one completion token so the very first SyncCPUtoSCSP() consumes it
+  // instead of blocking. That establishes the one-frame offset: from then on
+  // each frame's wait consumes the PREVIOUS frame's completion (already
+  // posted while the main thread was still emulating), so in steady state
+  // the wait returns immediately and the two threads genuinely overlap.
+  YabAddEventQueue(q_scsp_finish, 0);
   setM68kCounter(0);
 
 #if !(defined(__LIBRETRO__))
@@ -720,6 +740,44 @@ int YabauseEmulate(void) {
    SH2OnFrame(MSH2);
    SH2OnFrame(SSH2);
    u64 cpu_emutime = 0;
+   // Accumulates the WHOLE FRAME's worth of Slave cycles instead of handing
+   // SH2Exec() ~2600-3130 tiny per-deciline calls - flushed once, in a
+   // single SH2Exec(SSH2, ...) call, at VBlankIN below, strictly before the
+   // VDP1/VDP2 render pass (which only runs at LineCount==MaxLineCount, in
+   // VBlankOUT). Validated on a sibling branch (see README.md there) with
+   // real per-frame worker-thread batching of Slave execution; this is the
+   // same batching boundary and same safety argument, just done inline
+   // instead of on a separate thread since none of that infrastructure
+   // exists on this branch. The FRT/WDT leftover-carry cycle accounting
+   // inside SH2Exec()/FRTExec()/WDTExec() is exact regardless of how the
+   // total cycle count is chunked across calls, so the Slave's own internal
+   // timing (interrupts, FRC) is unaffected - what changes is only the
+   // interleaving with Master: Master no longer observes Slave's progress
+   // until the end of the frame. Known, accepted risk (same as the tested
+   // branch): a game using its own ad-hoc shared-RAM handshake between
+   // Master and Slave *within* a frame (distinct from the FRT
+   // cross-trigger, which still works correctly - see
+   // SSH2InputCaptureWriteWord in sh2core.c) could observe stale Slave
+   // state for one frame. See docs/per_deciline.md.
+   u32 sh2_slave_cycle_batch = 0;
+   // SmpcExec()/Cs2Exec() were called every deciline (~2600-3130x/frame) with
+   // whatever tiny usec delta had accumulated since the last call (usually 0
+   // or 1 raw unit) even though their own internal thresholds are far
+   // coarser (SMPC's smallest INTBACK timing constant is ~83us; CD-block's
+   // status/periodic checks are 333ms/6.6-16.6ms). Batch to once per
+   // scanline instead - still far finer than either subsystem's own
+   // thresholds, so no observable timing change, just ~10x fewer calls.
+   // Cs2Exec()'s two threshold checks (_statuscycles/_periodiccycles) were
+   // converted from `if` to `while` to defensively handle a single call's
+   // batched delta crossing more than one period, in case that assumption
+   // is ever wrong for some title. See docs/per_deciline.md - this is
+   // explicitly flagged there as the riskier of the two (CD-block timing
+   // has a documented regression history in this codebase), so the
+   // command-completion path (_commandtiming/_command_execlock) was left
+   // untouched: it already only ever completes one command per call by
+   // design, regardless of batch size, since a new command is only ever
+   // queued by an external CPU register write, never by Cs2Exec() itself.
+   u32 smpc_cs2_usec_batch = 0;
    while (!oneframeexec)
    {
       PROFILE_START("Total Emulation");
@@ -744,17 +802,17 @@ int YabauseEmulate(void) {
         if( amari != 0 ){
           SH2Exec(MSH2, amari);
           if (yabsys.IsSSH2Running)
-            SH2Exec(SSH2, amari);
+            sh2_slave_cycle_batch += amari;
         }
-        for (i = amari; i < sh2cycles; i += step){ 
+        for (i = amari; i < sh2cycles; i += step){
             SH2Exec(MSH2, step);
             if (yabsys.IsSSH2Running)
-               SH2Exec(SSH2, step);
+               sh2_slave_cycle_batch += step;
         }
       }else{
         SH2Exec(MSH2, sh2cycles);
         if (yabsys.IsSSH2Running)
-          SH2Exec(SSH2, sh2cycles);
+          sh2_slave_cycle_batch += sh2cycles;
       }
 
 #ifdef YAB_STATICS
@@ -778,7 +836,36 @@ int YabauseEmulate(void) {
          yabsys.DecilineCount = 0;
          yabsys.LineCount++;
 
+         // Flush the scanline's worth of accumulated SMPC/CD-block timing -
+         // see smpc_cs2_usec_batch's declaration above. Placed after
+         // yabsys.LineCount++ so SmpcExec()'s intback_wait_for_line check
+         // (keyed on LineCount==207) sees the up-to-date line number, same
+         // as it would have on whichever per-deciline call used to observe
+         // the transition first.
+         if (smpc_cs2_usec_batch > 0) {
+            PROFILE_START("SMPC");
+            SmpcExec(smpc_cs2_usec_batch);
+            PROFILE_STOP("SMPC");
+            PROFILE_START("CDB");
+            Cs2Exec(smpc_cs2_usec_batch);
+            PROFILE_STOP("CDB");
+         }
+         smpc_cs2_usec_batch = 0;
+
          if (yabsys.LineCount == yabsys.VBlankLineCount) {
+
+            // Flush the WHOLE FRAME's worth of accumulated Slave cycles as
+            // one job, once, here - see the comment where sh2_slave_cycle_batch
+            // is declared above for why this boundary (strictly before
+            // VBlankOUT's render pass) is safe. Deliberately NOT re-checking
+            // yabsys.IsSSH2Running here: the accumulation loop above already
+            // only added cycles for decilines where it was actually running,
+            // so the batch total alone (not the CURRENT flag value, which a
+            // game could have flipped off mid-frame via YabauseStopSlave())
+            // correctly says whether/how much to execute.
+            if (sh2_slave_cycle_batch > 0)
+              SH2Exec(SSH2, sh2_slave_cycle_batch);
+            sh2_slave_cycle_batch = 0;
 
 #if defined(ASYNC_SCSP)
             setM68kCounter((u64)(44100 * 256 / 60) << SCSP_FRACTIONAL_BITS);
@@ -809,16 +896,20 @@ int YabauseEmulate(void) {
       ScuExec(sh2cycles >> 1);
       PROFILE_STOP("SCU");
       PROFILE_START("68K");
+#ifndef ASYNC_SCSP
+      // Under ASYNC_SCSP (the only mode this build compiles - see scsp.h),
+      // M68KSync() is defined as an empty function; skip the ~2600-3130x/frame
+      // call+return for nothing. See docs/per_deciline.md.
       M68KSync();  // Wait for the previous iteration to finish
+#endif
       PROFILE_STOP("68K");
 
       yabsys.UsecFrac += usecinc;
-      PROFILE_START("SMPC");
-      SmpcExec(yabsys.UsecFrac >> YABSYS_TIMING_BITS);
-      PROFILE_STOP("SMPC");
-      PROFILE_START("CDB");
-      Cs2Exec(yabsys.UsecFrac >> YABSYS_TIMING_BITS);
-      PROFILE_STOP("CDB");
+      // Accumulate this deciline's usec delta into the per-scanline batch
+      // instead of calling SmpcExec()/Cs2Exec() here directly - see
+      // smpc_cs2_usec_batch's declaration above. Flushed once per scanline,
+      // in the DecilineCount==10 block below.
+      smpc_cs2_usec_batch += yabsys.UsecFrac >> YABSYS_TIMING_BITS;
       yabsys.UsecFrac &= YABSYS_TIMING_MASK;
       
 #if !defined(ASYNC_SCSP)
@@ -857,7 +948,9 @@ int YabauseEmulate(void) {
       }
       PROFILE_STOP("Total Emulation");
    }
+#ifndef ASYNC_SCSP
    M68KSync();
+#endif
 
 #ifdef YAB_WANT_SSF
 

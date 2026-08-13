@@ -961,7 +961,15 @@ void Cs2Exec(u32 timing) {
    }
 
 
-   if (Cs2Area->_statuscycles >= Cs2Area->_statustiming)
+   // Cs2Exec() is now called with a batched (up to one scanline's worth of)
+   // timing delta instead of a per-deciline one (see yabause.c) - `while`
+   // instead of `if` defensively handles a single call's delta crossing more
+   // than one period, which `if` would silently only process once for.
+   // _statustiming (~333ms) and _periodictiming (6.6-16.6ms) are both far
+   // larger than one scanline's worth of batched timing in practice, so
+   // this loop is not expected to iterate more than once - it's a
+   // correctness safety net, not a hot path. See docs/per_deciline.md.
+   while (Cs2Area->_statuscycles >= Cs2Area->_statustiming)
    {
       Cs2Area->_statuscycles -= Cs2Area->_statustiming;
       switch(Cs2Area->cdi->GetStatus())
@@ -989,9 +997,14 @@ void Cs2Exec(u32 timing) {
       }
    }
 
-   if (Cs2Area->_periodiccycles >= Cs2Area->_periodictiming)
+   // See the while-conversion comment above _statuscycles - same reasoning.
+   // A genuine multi-period iteration here (sector advancing more than once
+   // per call) is also just the mathematically-correct behavior for a
+   // repeating timer that's been fed more than one period's worth of time
+   // in a single call, not merely a defensive fallback.
+   while (Cs2Area->_periodiccycles >= Cs2Area->_periodictiming)
    {
-      Cs2Area->_periodiccycles -= Cs2Area->_periodictiming; 
+      Cs2Area->_periodiccycles -= Cs2Area->_periodictiming;
 	  if (Cs2Area->_periodictiming == SEEK_TIME){
 		  Cs2SetTiming(1);
 	  }

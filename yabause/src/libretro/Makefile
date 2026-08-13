@@ -466,6 +466,18 @@ endif
 
 OBJECTS += $(OBJECTS_C) $(OBJECTS_CXX) $(OBJECTS_S)
 
+# NO_LINK_GL=1: don't link GL/GLES/EGL at build time - leave those symbols
+# undefined in the .so so they resolve against the host's own libraries when
+# the frontend dlopen()s it. Needed when cross-compiling (e.g. aarch64 for an
+# R36S from an x86 box), where the target's GL libs aren't available locally
+# and shouldn't be baked in anyway. Drops -Wl,--no-undefined (which would
+# otherwise reject the deliberately-unresolved GL symbols) and filters the GL
+# libs out of LDFLAGS.
+ifeq ($(NO_LINK_GL), 1)
+	SHARED := -shared -Wl,--version-script=link.T
+	LDFLAGS := $(filter-out -lGLESv2 -lGLESv3 -lGL -lEGL,$(LDFLAGS))
+endif
+
 LDFLAGS += $(fpic) $(SHARED)
 FLAGS += $(fpic)
 
@@ -473,6 +485,12 @@ INCFLAGS := $(foreach dir,$(INCLUDE_DIRS),-I$(dir))
 
 WARNINGS :=
 FLAGS += $(INCFLAGS) $(ENDIANNESS_DEFINES) $(WARNINGS)
+
+# profile.c's PROFILE_START/STOP macros are compiled in (strcmp-based tag
+# lookup + clock() per call, hit ~1.5M+ times/sec from yabause.c's deciline
+# loop) unless DONT_PROFILE is defined. Nothing in this build ever consumes
+# that data, so always strip it. See docs/once_a_frame.md / docs/per_deciline.md.
+FLAGS += -DDONT_PROFILE
 
 CXXFLAGS += $(FLAGS) -std=gnu++11
 CFLAGS += $(FLAGS) -std=gnu11

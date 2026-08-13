@@ -97,6 +97,9 @@ readbytefunc ReadByteList[0x1000];
 readwordfunc ReadWordList[0x1000];
 readlongfunc ReadLongList[0x1000];
 
+u32 ReadCycleList[0x10000];
+u32 WriteCycleList[0x10000];
+
 u8 *HighWram;
 u8 *LowWram;
 u8 *BiosRom;
@@ -595,8 +598,77 @@ static void FillMemoryArea(unsigned short start, unsigned short end,
 
 //////////////////////////////////////////////////////////////////////////////
 
+// Populates ReadCycleList/WriteCycleList once at init, replicating exactly
+// the classification the GET_MEM_CYCLE_R/W switches (further down this
+// file) perform per-access. Must stay in sync with those switches if the
+// region cost table ever changes. See docs/once_a_frame.md.
+static void InitMemoryCycleTables(void)
+{
+   int i;
+   for (i = 0; i < 0x10000; i++)
+   {
+      u32 addr = (u32)i << 16;
+      u32 masked = addr & 0xDFF00000;
+
+      switch (masked)
+      {
+         case 0x00000000: /* ROM */
+         case 0x00100000: /* Backup */
+            ReadCycleList[i] = 16;
+            break;
+         case 0x00200000: /* Low */
+            ReadCycleList[i] = 12;
+            break;
+         case 0x02000000: /* CS0 */
+         case 0x05800000: /* CS2 */
+            ReadCycleList[i] = 24;
+            break;
+         case 0x05A00000: /* SOUND RAM */
+         case 0x05B00000: /* SOUND REG */
+         case 0x05C00000: /* VDP1 RAM */
+            ReadCycleList[i] = 50;
+            break;
+         case 0x05E00000: /* VDP2 RAM */
+            ReadCycleList[i] = CYCLE_DYNAMIC_VDP2;
+            break;
+         case 0x06000000: /* High */
+            ReadCycleList[i] = 0;
+            break;
+         default:
+            ReadCycleList[i] = 0;
+            break;
+      }
+
+      switch (masked)
+      {
+         case 0x00200000: /* Low */
+            WriteCycleList[i] = 7;
+            break;
+         case 0x05A00000: /* SOUND */
+            WriteCycleList[i] = 7;
+            break;
+         case 0x05C00000: /* VDP1 */
+            WriteCycleList[i] = 2;
+            break;
+         case 0x05E00000: /* VDP2 */
+            WriteCycleList[i] = CYCLE_DYNAMIC_VDP2;
+            break;
+         case 0x06000000: /* High */
+            WriteCycleList[i] = 2;
+            break;
+         default:
+            WriteCycleList[i] = 0;
+            break;
+      }
+   }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 void MappedMemoryInit()
 {
+   InitMemoryCycleTables();
+
    // Initialize everyting to unhandled to begin with
    FillMemoryArea(0x000, 0xFFF, &UnhandledMemoryReadByte,
                                 &UnhandledMemoryReadWord,
@@ -745,57 +817,21 @@ INLINE int getVramCycle(u32 addr) {
   return 2;
 }
 
-// gcc 4.9 bug
+// These used to independently re-derive "which memory region is this
+// address in" via a compare-chain switch on literally every SH-2 memory
+// access (both this classification AND the completely separate
+// (addr>>16)&0xFFF -> ReadByteList/WriteByteList dispatch immediately below
+// each of these call sites). Replaced with a single precomputed table
+// lookup (InitMemoryCycleTables(), populated once at MappedMemoryInit())
+// that reproduces the exact same per-address classification the switches
+// above used to compute. See docs/once_a_frame.md.
 #define GET_MEM_CYCLE_W \
-  switch (addr & 0xDFF00000) { \
-  case 0x00200000: /* Low */ \
-    *cycle = 7; \
-    break; \
-  case 0x05A00000: /* SOUND */ \
-    *cycle = 7; \
-    break; \
-  case 0x05C00000: /* VDP1 */ \
-    *cycle = 2; \
-    break; \
-  case 0x05e00000: /* VDP2 */ \
-    *cycle = getVramCycle(addr);  \
-    break; \
-  case 0x06000000: /* High */ \
-    *cycle = 2; \
-    break; \
-  default: \
-    *cycle = 0; \
-    break; \
-  } \
+  *cycle = WriteCycleList[addr >> 16]; \
+  if (UNLIKELY(*cycle == CYCLE_DYNAMIC_VDP2)) *cycle = getVramCycle(addr);
 
 #define GET_MEM_CYCLE_R \
-  switch (addr & 0xDFF00000) { \
-  case 0x00000000: /* ROM */ \
-  case 0x00100000: /* Backup */ \
-    *cycle = 16; \
-    break; \
-  case 0x00200000: /* Low */ \
-    *cycle = 12; \
-    break; \
-  case 0x02000000: /* CS0 */ \
-  case 0x05800000: /* CS2 */ \
-    *cycle = 24; \
-    break; \
-  case 0x05A00000: /* SOUND RAM */ \
-  case 0x05B00000: /* SOUND REG */ \
-  case 0x05C00000: /* VDP1 RAM */ \
-    *cycle = 50; \
-    break; \
-  case 0x05E00000: /* VDP2 RAM */ \
-    *cycle = getVramCycle(addr); \
-    break; \
-  case 0x06000000: /* High */ \
-    *cycle = 0; \
-    break; \
-  default: \
-    *cycle = 0; \
-    break; \
-  } \
+  *cycle = ReadCycleList[addr >> 16]; \
+  if (UNLIKELY(*cycle == CYCLE_DYNAMIC_VDP2)) *cycle = getVramCycle(addr);
 
 #endif
 

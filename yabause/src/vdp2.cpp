@@ -780,11 +780,20 @@ void Vdp2HBlankOUT(void) {
   if (yabsys.LineCount < yabsys.VBlankLineCount)
   {
     Vdp2Regs->TVSTAT &= ~0x0004;
-    u32 cell_scroll_table_start_addr = (Vdp2Regs->VCSTA.all & 0x7FFFE) << 1;
     memcpy(Vdp2Lines + yabsys.LineCount, Vdp2Regs, sizeof(Vdp2));
-    for (i = 0; i < 88; i++)
+    // cell_scroll_data is only ever read by vidsoft.c's NBG0-3/RBG0 draw
+    // entry points - the libretro/OGL build (VIDCORE_OGL, the only core this
+    // build ever compiles/links) reads info->verticalscrolltbl straight from
+    // Vdp2Ram per-cell instead and has zero references to this table. Skip
+    // the 88 VRAM reads/scanline (~23,000/frame) entirely when it has no
+    // consumer. See docs/once_a_frame.md.
+    if (VIDCore != NULL && VIDCore->id == VIDCORE_SOFT)
     {
-      cell_scroll_data[yabsys.LineCount].data[i] = Vdp2RamReadLong(cell_scroll_table_start_addr + i * 4);
+      u32 cell_scroll_table_start_addr = (Vdp2Regs->VCSTA.all & 0x7FFFE) << 1;
+      for (i = 0; i < 88; i++)
+      {
+        cell_scroll_data[yabsys.LineCount].data[i] = Vdp2RamReadLong(cell_scroll_table_start_addr + i * 4);
+      }
     }
 
 

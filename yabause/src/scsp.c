@@ -5527,11 +5527,36 @@ void ScspAsynMainCpuTime( void * p ){
     u64 m68k_done_counter = 0;
     u64 m68k_integer_part = 0;
     u64 m68k_cycle = 0;
-    do {
-      m68k_integer_part = getM68KCounter() >> SCSP_FRACTIONAL_BITS;
-      m68k_cycle = m68k_integer_part - pre_m68k_cycle;
-      if (thread_running == 0) break;
-    } while (m68k_cycle == 0);
+    {
+      // This wait was measured (perf, per-thread) as ~30% of the emulator's
+      // ENTIRE cost - ScspAsynMainCpuTime self 18.5% + getM68KCounter 11.3%,
+      // i.e. more than the SH-2 interpreter itself - while doing no work at
+      // all. Two separate bugs stacked:
+      //
+      //  1. It never actually slept. The previous version span locally up to
+      //     200000 iterations before falling back to a real sleep, on the
+      //     assumption that gap was longer than any realistic wait. It isn't:
+      //     the main thread bumps the counter every deciline (~6.3us), so the
+      //     spin ALWAYS exited via the counter check and the sleep was dead
+      //     code. Net effect was a permanently hot spin.
+      //  2. It woke on any counter change at all, but one audio sample needs
+      //     samplecnt(256) M68K cycles and a deciline only delivers ~71 - so
+      //     ~3 of every 4 wake-ups fell straight through the work loop below
+      //     (m68k_inc < samplecnt) and went back to spinning, having done
+      //     nothing.
+      //
+      // Fixed by waiting for the condition that actually matters - a whole
+      // sample's worth of cycles banked - and yielding the core (real sleep)
+      // rather than burning it while waiting. The sleep is far shorter than
+      // the audio buffer (tens of ms), so this costs no measurable latency.
+      for (;;) {
+        m68k_integer_part = getM68KCounter() >> SCSP_FRACTIONAL_BITS;
+        m68k_cycle = m68k_integer_part - pre_m68k_cycle;
+        if (thread_running == 0) break;
+        if ((m68k_inc + m68k_cycle) >= (u64)samplecnt) break;
+        YabThreadUSleep(50);
+      }
+    }
 
     m68k_inc += m68k_cycle;
     pre_m68k_cycle = m68k_integer_part;

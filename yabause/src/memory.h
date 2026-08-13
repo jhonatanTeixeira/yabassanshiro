@@ -397,6 +397,23 @@ extern "C" {
   extern readwordfunc ReadWordList[0x1000];
   extern readlongfunc ReadLongList[0x1000];
 
+  // Precomputed per-region wait-state cycle cost, replacing the compare-chain
+  // switch (on addr & 0xDFF00000) that used to run on every single memory
+  // access. Indexed by the FULL addr>>16 (0x10000 entries, NOT the truncated
+  // (addr>>16)&0xFFF used by ReadByteList/WriteByteList) - the original
+  // switch classifies on bits the byte/word/long dispatch tables' 12-bit
+  // index legitimately discards (e.g. an access mirrored through the
+  // 0x80000000+ window gets different accounting than the same low bits
+  // accessed directly), so the cycle table needs the full 16 bits to stay
+  // bit-for-bit faithful to the original. CYCLE_DYNAMIC_VDP2 marks the one
+  // region (VDP2 RAM) whose cost genuinely depends on runtime state
+  // (yabsys.LineCount / Vdp2External.cpu_cycle_a/b) and can't be
+  // precomputed - callers must still call getVramCycle() for that case.
+  // See docs/once_a_frame.md.
+  #define CYCLE_DYNAMIC_VDP2 0xFFFFFFFFu
+  extern u32 ReadCycleList[0x10000];
+  extern u32 WriteCycleList[0x10000];
+
   typedef struct {
     u32 addr;
     u32 val;

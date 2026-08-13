@@ -582,6 +582,12 @@ static void FASTCALL Vdp1ReadTexture(vdp1cmd_struct *cmd, YglSprite *sprite, Ygl
   u32 alpha = 0xFF;
   u8 addcolor = 0;
   int SPCCCS = (fixVdp2Regs->SPCTL >> 12) & 0x3;
+  // fixVdp2Regs is a frozen per-draw-pass snapshot (see VIDOGLVdp1DrawStart) -
+  // these are provably identical across every texel of every sprite in the
+  // frame, so hoist them out of the per-texel loops below instead of
+  // re-reading/re-masking SPCTL up to 12x per texel. See docs/once_a_frame.md.
+  const int rgbSpritesAllowed = (fixVdp2Regs->SPCTL & 0x20) != 0;
+  const int spriteType = fixVdp2Regs->SPCTL & 0xF;
   VDP1LOG("Making new sprite %08X\n", charAddr);
 
   if (/*fixVdp2Regs->SDCTL != 0 &&*/ MSB != 0) {
@@ -631,7 +637,7 @@ static void FASTCALL Vdp1ReadTexture(vdp1cmd_struct *cmd, YglSprite *sprite, Ygl
         }
         else {
           int colorindex = ((dot >> 4) | colorBank);
-          if ((colorindex & 0x8000) && (fixVdp2Regs->SPCTL & 0x20)) {
+          if ((colorindex & 0x8000) && (rgbSpritesAllowed)) {
               *texture->textdata++ = VDP1COLOR(0, colorcl, priority, 0, VDP1COLOR16TO24(colorindex));
           }else {
               *texture->textdata++ = VDP1COLOR(1, colorcl, priority, 0, colorindex);
@@ -655,7 +661,7 @@ static void FASTCALL Vdp1ReadTexture(vdp1cmd_struct *cmd, YglSprite *sprite, Ygl
         }
         else {
           int colorindex = ((dot&0x0F) | colorBank);
-          if ((colorindex & 0x8000) && (fixVdp2Regs->SPCTL & 0x20)) {
+          if ((colorindex & 0x8000) && (rgbSpritesAllowed)) {
             *texture->textdata++ = VDP1COLOR(0, colorcl, priority, 0, VDP1COLOR16TO24(colorindex));
           }
           else {
@@ -701,11 +707,11 @@ static void FASTCALL Vdp1ReadTexture(vdp1cmd_struct *cmd, YglSprite *sprite, Ygl
           if ( (colorindex & 0x8000) && MSB_SHADOW) {
               *texture->textdata++ = VDP1COLOR(1, 0, priority, 1, 0);
           } else if (colorindex != 0x0000) {
-            if ((colorindex & 0x8000) && (fixVdp2Regs->SPCTL & 0x20)) {
+            if ((colorindex & 0x8000) && (rgbSpritesAllowed)) {
               *texture->textdata++ = VDP1COLOR(0, colorcl, 0, 0, VDP1COLOR16TO24(colorindex));
             } else {
               temp = colorindex;
-              Vdp1ProcessSpritePixel(fixVdp2Regs->SPCTL & 0xF, &temp, &shadow, &normalshadow, &priority, &colorcl);
+              Vdp1ProcessSpritePixel(spriteType, &temp, &shadow, &normalshadow, &priority, &colorcl);
               if (shadow || normalshadow) {
                 *texture->textdata++ = VDP1COLOR(1, 0, priority, 1, 0);
               } else {
@@ -740,11 +746,11 @@ static void FASTCALL Vdp1ReadTexture(vdp1cmd_struct *cmd, YglSprite *sprite, Ygl
           }
           else if (colorindex != 0x0000)
           {
-            if ((colorindex & 0x8000) && (fixVdp2Regs->SPCTL & 0x20)) {
+            if ((colorindex & 0x8000) && (rgbSpritesAllowed)) {
               *texture->textdata++ = VDP1COLOR(0, colorcl, 0, 0, VDP1COLOR16TO24(colorindex));
             } else {
               temp = colorindex;
-              Vdp1ProcessSpritePixel(fixVdp2Regs->SPCTL & 0xF, &temp, &shadow, &normalshadow, &priority, &colorcl);
+              Vdp1ProcessSpritePixel(spriteType, &temp, &shadow, &normalshadow, &priority, &colorcl);
               if (shadow || normalshadow) {
                 *texture->textdata++ = VDP1COLOR(1, 0, priority, 1, 0);
               } else {
@@ -790,7 +796,7 @@ static void FASTCALL Vdp1ReadTexture(vdp1cmd_struct *cmd, YglSprite *sprite, Ygl
         }
         else {
           const int colorindex = ((dot & 0x3F) | colorBank);
-          if ((colorindex & 0x8000) && (fixVdp2Regs->SPCTL & 0x20)) {
+          if ((colorindex & 0x8000) && (rgbSpritesAllowed)) {
             *texture->textdata++ = VDP1COLOR(0, colorcl, priority, 0, VDP1COLOR16TO24(colorindex));
           }
           else {
@@ -829,7 +835,7 @@ static void FASTCALL Vdp1ReadTexture(vdp1cmd_struct *cmd, YglSprite *sprite, Ygl
         }
         else {
           const int colorindex = ((dot & 0x7F) | colorBank);
-          if ((colorindex & 0x8000) && (fixVdp2Regs->SPCTL & 0x20)) {
+          if ((colorindex & 0x8000) && (rgbSpritesAllowed)) {
             *texture->textdata++ = VDP1COLOR(0, colorcl, priority, 0, VDP1COLOR16TO24(colorindex));
           }
           else {
@@ -866,10 +872,10 @@ static void FASTCALL Vdp1ReadTexture(vdp1cmd_struct *cmd, YglSprite *sprite, Ygl
           *texture->textdata++ = VDP1COLOR(1, 0, priority, 1, 0);
         } else {
           const int colorindex = (dot | colorBank);
-          if ((colorindex & 0x8000) && (fixVdp2Regs->SPCTL & 0x20)) {
+          if ((colorindex & 0x8000) && (rgbSpritesAllowed)) {
             *texture->textdata++ = VDP1COLOR(0, colorcl, priority, 0, VDP1COLOR16TO24(colorindex));
           } else {
-            Vdp1MaskSpritePixel(fixVdp2Regs->SPCTL & 0xF, (u16 *)&colorindex,&colorcl);
+            Vdp1MaskSpritePixel(spriteType, (u16 *)&colorindex,&colorcl);
             *texture->textdata++ = VDP1COLOR(1, colorcl, priority, 0, colorindex);
           }
         }
@@ -909,11 +915,11 @@ static void FASTCALL Vdp1ReadTexture(vdp1cmd_struct *cmd, YglSprite *sprite, Ygl
           *texture->textdata++ = VDP1COLOR(0, 1, priority, 1, 0);
         }
         else {
-          if (dot & 0x8000 && (fixVdp2Regs->SPCTL & 0x20) ) {
+          if (dot & 0x8000 && (rgbSpritesAllowed) ) {
              *texture->textdata++ = VDP1COLOR(0, colorcl, priority, 0, VDP1COLOR16TO24(dot));
           }
           else {
-            Vdp1MaskSpritePixel(fixVdp2Regs->SPCTL & 0xF, (u16 *)&dot, &colorcl);
+            Vdp1MaskSpritePixel(spriteType, (u16 *)&dot, &colorcl);
             *texture->textdata++ = VDP1COLOR(1, colorcl, priority, 0, dot );
           }
         }
@@ -1917,6 +1923,17 @@ INLINE void Vdp2SetSpecialPriority(vdp2draw_struct *info, u8 dot, u32 * craminde
 }
 
 INLINE u32 Vdp2GetAlpha(vdp2draw_struct *info, u8 dot, u32 cramindex) {
+  // specialcolormode==0 means the switch below has no matching case in
+  // either branch, so alpha is always left unchanged at info->alpha - skip
+  // the CCCTL read/branch and the per-texel call overhead entirely for what
+  // is the common case (most backgrounds don't use special color calc).
+  // NOTE: this must stay a per-info (per-layer/per-call) check, not hoisted
+  // to info->blendmode's VDP2_CC_ADD bit - that bit additionally requires
+  // this layer's own CCCTL enable bit to be set, which is NOT equivalent to
+  // the raw CCMD bit read here (CCMD is defined regardless of whether this
+  // layer's color-calc-enable bit is on). See docs/once_a_frame.md.
+  if (info->specialcolormode == 0) return info->alpha;
+
   u32 alpha = info->alpha;
   const int CCMD = ((fixVdp2Regs->CCCTL >> 8) & 0x01);  // hard/vdp2/hon/p12_14.htm#CCMD_
   if (CCMD == 0) {  // Calculate Rate mode
@@ -3346,6 +3363,17 @@ static void Vdp2DrawMapTest(vdp2draw_struct *info, YglTexture *texture) {
   int h, v;
   int cell_count = 0;
 
+  // Memoization guard, ported from the identical pattern in the sibling
+  // Vdp2DrawMapPerLine(): most consecutive tiles stay within the same
+  // map/plane/page (a page spans 32x32 or 64x64 cells - far more than one
+  // patternpixelwh step), so skip re-resolving plane/pattern addressing when
+  // nothing actually changed since the last tile. See docs/once_a_frame.md.
+  int preplanex = -1;
+  int preplaney = -1;
+  int prepagex = -1;
+  int prepagey = -1;
+  int premapid = -1;
+
   const int planeh_shift = 9 + (info->planeh - 1);
   const int planew_shift = 9 + (info->planew - 1);
   const int plane_shift = 9;
@@ -3426,8 +3454,20 @@ static void Vdp2DrawMapTest(vdp2draw_struct *info, YglTexture *texture) {
       charx = dot_on_pagex & page_mask;
       if (pagex < 0) pagex = info->pagewh - 1 + pagex;
 
-      info->PlaneAddr(info, info->mapwh * mapy + mapx, fixVdp2Regs);
-      Vdp2PatternAddrPos(info, planex, pagex, planey, pagey);
+      {
+        const int mapid = info->mapwh * mapy + mapx;
+        if (mapid != premapid) {
+          info->PlaneAddr(info, mapid, fixVdp2Regs);
+          premapid = mapid;
+        }
+      }
+      if (planex != preplanex || pagex != prepagex || planey != preplaney || pagey != prepagey) {
+        Vdp2PatternAddrPos(info, planex, pagex, planey, pagey);
+        preplanex = planex;
+        preplaney = planey;
+        prepagex = pagex;
+        prepagey = pagey;
+      }
       Vdp2DrawPatternPos(info, texture, h - charx, v - chary, 0, 0, info->lineinc);
 
     }
@@ -6071,17 +6111,23 @@ int VIDOGLVdp2Reset(void)
 
 //////////////////////////////////////////////////////////////////////////////
 
+// Extern: set by every CPU/DMA write to Vdp1Ram (vdp1.cpp, itself already
+// extern "C" there). Cleared here, below, whenever consumed.
+extern u8 g_Vdp1RamUpdated;
+
 void VIDOGLVdp2DrawStart(void)
 {
   fixVdp2Regs = Vdp2RestoreRegs(0, Vdp2Lines);
   if (fixVdp2Regs == NULL) fixVdp2Regs = Vdp2Regs;
   VIDOGLVdp2SetResolution(fixVdp2Regs->TVMD);
 
+  int resized = 0;
   if (_Ygl->rwidth > YglTM->width) {
     int new_width = _Ygl->rwidth;
     int new_height = YglTM->height;
     YglTMDeInit(YglTM);
     YglTM = YglTMInit(new_width, new_height);
+    resized = 1;
   }
   YglReset();
   //if (_Ygl->sync != 0) {
@@ -6096,11 +6142,86 @@ void VIDOGLVdp2DrawStart(void)
   //}
 
   YglTmPull(YglTM, 0);
-  YglTMReset(YglTM);
-  YglCacheReset(YglTM);
+
+  // The shared VDP1/VDP2 texture atlas cache (built below by VDP1 sprite
+  // processing and VDP2 background/RBG drawing, both keyed on
+  // content-addressed cache keys - see Vdp2DrawPatternPos/Vdp1ReadTexture)
+  // used to be unconditionally wiped and rebuilt from scratch every single
+  // frame, even for 100% static content (menus, dialogue boxes, paused
+  // scenes) - every cached tile/sprite got re-decoded from VRAM and
+  // re-uploaded to the GPU for no reason. Every texture-build function is a
+  // pure function of (VDP1/VDP2 register state, Vdp1Ram, Vdp2Ram,
+  // Vdp2ColorRam): if all four are provably identical to last frame, every
+  // cache lookup this frame is guaranteed to hit exactly what's already in
+  // the atlas, so the reset (and the wasted rebuild work it forces) can be
+  // skipped entirely. Register state is checked via a whole-struct memcmp
+  // against a saved snapshot rather than trying to enumerate every field
+  // that could affect decoding (e.g. SPCTL, CHCTLA/B, coloroffset, window
+  // regs) - that would be easy to get subtly wrong and silently show stale
+  // pixels; a memcmp can't miss a field. See docs/once_a_frame.md.
+  //
+  // CORRECTION (found by profiling a supposedly-static dialogue scene that
+  // stubbornly refused to get any cheaper): a handful of fields in these
+  // structs are live hardware STATUS, not "what to draw" configuration, and
+  // are specifically designed to change every single frame regardless of
+  // content - most damningly Vdp1Regs->EDSR, which gets unconditionally
+  // bit-shifted once per frame (`EDSR >>= 1`, vdp2.cpp) as a 2-frame-deep
+  // draw-completion status, guaranteeing a whole-struct memcmp sees "dirty"
+  // every frame forever. Also excluded: Vdp1Regs->addr/COPR (VDP1's
+  // internal command-list walk position - legitimately different at
+  // whatever point mid-walk this snapshot lands on) and Vdp2Regs->TVSTAT
+  // (live VBlank/HBlank/odd-field scan status). None of these four affect
+  // how any texture gets decoded; comparing them was actively defeating the
+  // cache. Zeroing them out of local copies before comparing, rather than
+  // switching to an enumerate-only-the-fields-that-matter approach, keeps
+  // the "can't miss a relevant field" safety property for everything else -
+  // false positives here only cost performance, never correctness, so
+  // erring toward comparing more fields than strictly necessary is the safe
+  // direction if another such status field turns up later.
+  static Vdp2 prev_frame_vdp2regs;
+  static Vdp1 prev_frame_vdp1regs;
+  static int have_prev_frame_regs = 0;
+
+  Vdp2 sanitized_vdp2regs = *fixVdp2Regs;
+  sanitized_vdp2regs.TVSTAT = 0;
+
+  int vdp1_dirty = 0;
+  if (Vdp1Regs != NULL) {
+    Vdp1 sanitized_vdp1regs = *Vdp1Regs;
+    sanitized_vdp1regs.EDSR = 0;
+    sanitized_vdp1regs.addr = 0;
+    sanitized_vdp1regs.COPR = 0;
+    vdp1_dirty = memcmp(&prev_frame_vdp1regs, &sanitized_vdp1regs, sizeof(Vdp1)) != 0;
+    if (vdp1_dirty) prev_frame_vdp1regs = sanitized_vdp1regs;
+  }
+
+  int vdp2_dirty = memcmp(&prev_frame_vdp2regs, &sanitized_vdp2regs, sizeof(Vdp2)) != 0;
+  if (vdp2_dirty) prev_frame_vdp2regs = sanitized_vdp2regs;
+
+  int content_dirty =
+       g_Vdp1RamUpdated || A0_Updated || A1_Updated || B0_Updated || B1_Updated
+    || Vdp2ColorRamUpdated
+    || !have_prev_frame_regs
+    || vdp2_dirty || vdp1_dirty;
+
+  if (resized || content_dirty)
+  {
+    YglTMReset(YglTM);
+    YglCacheReset(YglTM);
+
+    g_Vdp1RamUpdated = 0;
+    have_prev_frame_regs = 1;
+    // prev_frame_vdp2regs/prev_frame_vdp1regs are already updated above
+    // (whenever their own sanitized comparison found a difference) -
+    // nothing further to do with them here.
+    //
+    // Deliberately NOT clearing A0-B1_Updated or Vdp2ColorRamUpdated here -
+    // they have their own existing consumers/reset points elsewhere
+    // (Vdp2DrawRBG0 and YglUpdateColorRam respectively, both called later
+    // this same frame, after this function) which must still see them.
+  }
+
   _Ygl->texture_manager = YglTM;
-
-
 }
 
 //////////////////////////////////////////////////////////////////////////////

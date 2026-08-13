@@ -75,6 +75,12 @@ atomic<int> vdp1_clock{ 0 };
 condition_variable vdp1_clock_cv;
 mutex vdp1_clock_mtx;
 
+// Set on every CPU/DMA write to Vdp1Ram, read (and cleared) by
+// VIDOGLVdp2DrawStart() to decide whether the shared VDP1/VDP2 texture
+// atlas cache can be kept across frames instead of being wiped and rebuilt
+// from scratch. See docs/once_a_frame.md and vidogl.c.
+extern "C" u8 g_Vdp1RamUpdated = 0;
+
 
 void Vdp1_onHblank() {
 #if 0
@@ -122,6 +128,7 @@ extern "C" void FASTCALL Vdp1RamWriteByte(u32 addr, u8 val) {
    addr &= 0x7FFFF;
    T1WriteByte(Vdp1Ram, addr, val);
    vdp1_clock = 0;
+   g_Vdp1RamUpdated = 1;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -129,6 +136,7 @@ extern "C" void FASTCALL Vdp1RamWriteWord(u32 addr, u16 val) {
    addr &= 0x7FFFF;
    T1WriteWord(Vdp1Ram, addr, val);
    vdp1_clock = 0;
+   g_Vdp1RamUpdated = 1;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -138,6 +146,7 @@ extern "C" void FASTCALL Vdp1RamWriteLong(u32 addr, u32 val) {
    //LOG("Vdp1RamWriteLong @ %08X", CurrentSH2->regs.PC);
    T1WriteLong(Vdp1Ram, addr, val);
    vdp1_clock = 0;
+   g_Vdp1RamUpdated = 1;
 }
 
 //////////////////////////////////////////////////////////////////////////////

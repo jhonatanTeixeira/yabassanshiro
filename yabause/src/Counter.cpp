@@ -42,16 +42,26 @@ extern "C" {
   void SyncCPUtoSCSP();
   extern u64 g_m68K_dec_cycle;
 
+  // m68k_counter is a single-producer (main emulation thread, once per
+  // deciline, ~156K-188K times/sec)/single-consumer (ScspAsynMainCpuTime
+  // worker thread) monotonic counter handoff - not a case needing total
+  // (seq_cst, the std::atomic default) ordering. release/acquire is the
+  // standard correct minimum for this pattern: every prior write by the
+  // producer before the store is guaranteed visible to the consumer after
+  // its load sees that value, which is all that's needed here. Cheaper on
+  // both x86 (elides the seq_cst-mandated fence) and ARM (weaker barrier)
+  // than the default. See docs/per_deciline.md. Same reasoning applies to
+  // m68k_counter_done (producer: the SCSP worker thread).
   void setM68kCounter(u64 counter) {
-    m68k_counter = counter;
+    m68k_counter.store(counter, std::memory_order_release);
   }
 
   void setM68kDoneCounter(u64 counter) {
-    m68k_counter_done = counter;
+    m68k_counter_done.store(counter, std::memory_order_release);
   }
 
   u64 getM68KCounter() {
-    return m68k_counter;
+    return m68k_counter.load(std::memory_order_acquire);
   }
 
   void syncM68K() {

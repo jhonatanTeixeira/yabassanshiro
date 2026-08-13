@@ -1776,12 +1776,27 @@ static void ISOCDReadAheadFAD(UNUSED u32 FAD)
 #define CD_MAX_TRACKS           (99)    /* AFAIK the theoretical limit */
 #define CD_TRACK_PADDING 4
 
+// libchdr's own hunk cache (chd->cache/cachehunk, see hunk_read_into_cache()
+// in libchdr_chd.c) is dead code - chd_read() never calls it, so every
+// single chd_read() decompresses its hunk from scratch with zero caching
+// at that layer. This struct used to guard that with a single-hunk cache
+// (current_hunk_id) here instead, which handles straight sequential reads
+// fine but thrashes hard the moment the read pattern alternates between two
+// disc locations (e.g. streamed CD-DA audio interleaved with occasional
+// game-data reads elsewhere on the disc) - each switch evicts the one
+// cached hunk, forcing a full LZMA re-decompress of the same ~19.5KB hunk
+// every time either side is read again. Widened to a small multi-slot LRU;
+// even a generous slot count costs only a few hundred KB (hunkbytes is
+// typically ~19.5KB for a CD CHD - 8 sectors/hunk). See docs/once_a_frame.md.
+#define CHD_HUNK_CACHE_SLOTS 64
 typedef struct ChdInfo_ {
   chd_file *chd;
   core_file * image_file;
   const chd_header * header;
-  char * hunk_buffer;
-  int current_hunk_id;
+  char * hunk_cache_buf[CHD_HUNK_CACHE_SLOTS];
+  int hunk_cache_id[CHD_HUNK_CACHE_SLOTS];
+  u32 hunk_cache_age[CHD_HUNK_CACHE_SLOTS];
+  u32 hunk_cache_clock;
 } ChdInfo;
 
 ChdInfo * pChdInfo = NULL;
@@ -1986,9 +2001,18 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
 
   memcpy(disc.session[0].track, trk, num_tracks * sizeof(track_info_struct));
 
-  pChdInfo->hunk_buffer = malloc(pChdInfo->header->hunkbytes);
-  chd_read(pChdInfo->chd, 0, pChdInfo->hunk_buffer);
-  pChdInfo->current_hunk_id = 0;
+  {
+    int i;
+    for (i = 0; i < CHD_HUNK_CACHE_SLOTS; i++) {
+      pChdInfo->hunk_cache_buf[i] = malloc(pChdInfo->header->hunkbytes);
+      pChdInfo->hunk_cache_id[i] = -1;
+      pChdInfo->hunk_cache_age[i] = 0;
+    }
+    pChdInfo->hunk_cache_clock = 0;
+    chd_read(pChdInfo->chd, 0, pChdInfo->hunk_cache_buf[0]);
+    pChdInfo->hunk_cache_id[0] = 0;
+    pChdInfo->hunk_cache_age[0] = ++pChdInfo->hunk_cache_clock;
+  }
 
   return 0;
 }
@@ -2034,19 +2058,37 @@ static int ISOCDReadSectorFADFromCHD(u32 FAD, void *buffer) {
   int hunkid = (chdlba*CD_FRAME_SIZE) / pChdInfo->header->hunkbytes ;
   int hunk_offset =  (chdlba*CD_FRAME_SIZE) % pChdInfo->header->hunkbytes;
 
-  if (pChdInfo->current_hunk_id != hunkid) {
-    chd_read(pChdInfo->chd, hunkid, pChdInfo->hunk_buffer);
-    pChdInfo->current_hunk_id = hunkid;
+  // Multi-slot LRU hunk cache - see ChdInfo_'s declaration for why a single
+  // slot (the old current_hunk_id) thrashes on alternating read patterns.
+  char * hunk_buffer;
+  {
+    int slot = -1;
+    int i;
+    for (i = 0; i < CHD_HUNK_CACHE_SLOTS; i++) {
+      if (pChdInfo->hunk_cache_id[i] == hunkid) { slot = i; break; }
+    }
+    if (slot < 0) {
+      // Cache miss - evict the least-recently-used slot.
+      int lru = 0;
+      for (i = 1; i < CHD_HUNK_CACHE_SLOTS; i++) {
+        if (pChdInfo->hunk_cache_age[i] < pChdInfo->hunk_cache_age[lru]) lru = i;
+      }
+      chd_read(pChdInfo->chd, hunkid, pChdInfo->hunk_cache_buf[lru]);
+      pChdInfo->hunk_cache_id[lru] = hunkid;
+      slot = lru;
+    }
+    pChdInfo->hunk_cache_age[slot] = ++pChdInfo->hunk_cache_clock;
+    hunk_buffer = pChdInfo->hunk_cache_buf[slot];
   }
 
   if (track->ctl_addr == 0x01) {
     for (int i = 0; i < track->sector_size; i += 2) {
-      ((char*)buffer)[i] = pChdInfo->hunk_buffer[hunk_offset + i + 1];
-      ((char*)buffer)[i+1] = pChdInfo->hunk_buffer[hunk_offset + i];
+      ((char*)buffer)[i] = hunk_buffer[hunk_offset + i + 1];
+      ((char*)buffer)[i+1] = hunk_buffer[hunk_offset + i];
     }
   }
   else {
-    memcpy(buffer, pChdInfo->hunk_buffer + hunk_offset, track->sector_size);
+    memcpy(buffer, hunk_buffer + hunk_offset, track->sector_size);
   }
 
   return 1;

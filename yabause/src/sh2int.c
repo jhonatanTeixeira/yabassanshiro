@@ -3153,12 +3153,30 @@ FASTCALL void SH2InterpreterExec(SH2_struct *context, u32 cycles)
   int target_cycle = context->cycles + cycles - context->pre_cycle;
   SH2HandleInterrupts(context);
 
-#ifndef EXEC_FROM_CACHE
-   if (context->isIdle)
-     SH2idleParse(context, target_cycle);
-   else
-     SH2idleCheck(context, target_cycle);
-#endif
+   // Idle-loop detection (sh2idle.c) used to be unconditionally disabled by
+   // this same #ifdef, as a side effect of it also guarding an unrelated
+   // feature (executing code from the SH-2 cache-as-RAM data array at
+   // 0xC0000000+, a niche compatibility hack for one reported game). That
+   // pairing wasn't arbitrary: sh2idle.c's own instruction fetch helpers
+   // (the delayCheck macro and friends) call fetchlist[] directly and don't
+   // know about the DataArrayReadWord special case the main dispatch loop
+   // below uses for that region - detecting/parsing an "idle loop" that
+   // lives in cache-as-RAM could fetch stale/wrong instruction words.
+   // Spin-wait loops (poll VBlank/HBlank/DMA/SCU status) are extremely
+   // common in Saturn game code and this detector exists specifically to
+   // fast-forward them instead of interpreting cycle-by-cycle - re-enable
+   // it, but only when PC is outside the cache-as-RAM region, so it never
+   // has to reason about that fetch path at all. context->isIdle is simply
+   // left as-is on calls where PC is inside that region; nothing else in
+   // this function reads it, so that's a no-op, not a leak. See
+   // docs/once_a_frame.md and docs/per_deciline.md.
+   if ((context->regs.PC & 0xC0000000) != 0xC0000000)
+   {
+     if (context->isIdle)
+       SH2idleParse(context, target_cycle);
+     else
+       SH2idleCheck(context, target_cycle);
+   }
 
    while (context->cycles < target_cycle)
    {
@@ -3169,6 +3187,18 @@ FASTCALL void SH2InterpreterExec(SH2_struct *context, u32 cycles)
       else
 #endif
       context->instruction = fetchlist[(context->regs.PC >> 20) & 0x0FF](context->regs.PC);
+
+      // SLEEP just adds 3 cycles and re-fetches itself forever - nothing else
+      // changes until an interrupt, and interrupts are only serviced at the
+      // next SH2InterpreterExec() call boundary (see SH2HandleInterrupts()
+      // above), not mid-loop here. So there is no need to re-fetch/re-execute
+      // it every 3 cycles: consume the rest of this call's cycle budget in
+      // one step instead. Behavior-identical, see docs/per_deciline.md.
+      if (UNLIKELY(opcodes[context->instruction] == SH2sleep))
+      {
+         context->cycles = target_cycle;
+         break;
+      }
 
       // Execute it
       opcodes[context->instruction](context);

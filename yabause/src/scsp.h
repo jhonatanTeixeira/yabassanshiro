@@ -94,7 +94,32 @@ typedef struct
 #define MAX_BREAKPOINTS 10
 
 //#if defined(ARCH_IS_LINUX)
-#define ASYNC_SCSP
+// ASYNC_SCSP runs SCSP+sound-M68K on a dedicated thread that tracks the main
+// thread through the m68k_counter atomic. Profiling showed that handshake -
+// not the audio synthesis - was ~30% of the emulator's entire cost (the wait
+// loop span hot instead of sleeping, and woke ~4x more often than it had a
+// full audio sample's worth of work to do). The spin itself is fixed now, but
+// the async model still costs a counter handshake, wake-up syscalls, and
+// SoundRam cache-line ping-pong between two cores.
+//
+// The synchronous path is fully present in this tree (ScspExec() at the
+// !ASYNC_SCSP branch in scsp.c shares its whole sample-generation tail with
+// ScspExecAsync(), and yabause.c has the matching per-deciline M68KExec() +
+// new_scsp_exec() branch) - it was just never compiled. Turning it on makes
+// SCSP cycle-driven and deterministic, exactly like SH-2/SCU/SMPC/CD already
+// are, and deletes the whole cross-thread handshake.
+// KEEP THIS ON for multi-core targets (R36S and friends). Measured both ways:
+//
+//   async + fixed wait : audio on its own core, main thread untouched
+//   sync (this off)    : ~half the TOTAL cpu, but the main thread absorbs all
+//                        the SCSP/M68K work
+//
+// Sync looks better on a desktop where total CPU is the metric. It is the
+// WRONG trade on a weak handheld, where the main thread is already pinned at
+// 100% and IS the framerate ceiling - moving audio onto it makes the critical
+// path longer and framerate worse, however good the total looks. Spare cores
+// are free real estate there; the main thread is not.
+//#define ASYNC_SCSP
 //#endif
 
 typedef struct
