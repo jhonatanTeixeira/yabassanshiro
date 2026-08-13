@@ -68,7 +68,7 @@ static int g_sh2coretype = SH2CORE_INTERPRETER;
 
 static int g_frame_skip = 1;
 static int g_rbg_resolution_mode = RBG_RES_ORIGINAL;
-static int g_rbg_use_compute_shader = 0;
+static int g_rbg_use_compute_shader = 1;
 static int addon_cart_type = CART_DRAM32MBIT;
 static int g_resolution_mode = RES_ORIGINAL;
 static int resolution_mode = RES_ORIGINAL;

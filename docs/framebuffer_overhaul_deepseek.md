@@ -1,5 +1,56 @@
 # VDP1 Framebuffer System — Complete Study & Overhaul Proposal
 
+## ⚠️ CRITICAL UPDATE: Empirical Benchmark Evidence (August 2026)
+
+**Retrorun3 `--benchmark` measurements on R36S (RK3326, Mali-G31, Magic Knight Rayearth) prove
+the framebuffer is NOT the bottleneck.** The CPU emulation thread is.
+
+### Key Measurements (all governors `performance`)
+
+| Metric | Value | Interpretation |
+|--------|-------|----------------|
+| `core_avg` | 18.63ms | CPU emulation thread — **EXCEEDS 16.66ms frame budget** |
+| `video_avg` | 4.67ms | GPU presentation — **4× headroom available** |
+| `core_avg : video_avg` | 4:1 | CPU-bound, NOT GPU-bound |
+| GPU utilization | ~8% | Mali-G31 idle most of the time |
+| `g_resolution_mode` | RES_ORIGINAL | Already at native Saturn res (352×224) |
+
+### Verified Optimizations
+
+| Config | FPS | core_avg | Δ vs baseline |
+|--------|-----|----------|---------------|
+| Baseline (dynarec, RBG off) | 42.89 | 18.63ms | — |
+| RBG compute shader ON | 45.55 | 17.30ms | **-1.33ms CPU** |
+| SH-2 interpreter (no dynarec) | 35.46 | 24.41ms | **+5.78ms CPU** |
+| Frameskip OFF | 42.39 | 19.11ms | dup=0, underruns unchanged |
+
+### What This Means for the Framebuffer Overhaul
+
+**The framebuffer implementation is NOT the problem.** The GPU completes its work in ~4.7ms
+with 4× headroom to the 16.66ms budget. The proposals below (dirty-rect tracking, persistent
+mapping, 16-bit format, compute shader read-back) would save at most 1-2ms of CPU time —
+worthwhile but not transformative.
+
+**The real bottleneck is the CPU emulation thread:**
+- SH-2 interpreter dispatch: ~8-10ms/frame
+- Memory bus address decode: ~2-3ms/frame
+- VDP command processing: ~3-4ms/frame
+- RBG CPU math (when compute shader off): ~1.33ms/frame (verified)
+- Dead work (`cell_scroll_data`, `M68KSync()`): ~0.8-1.5ms/frame
+
+**Revised priority:**
+1. **P0**: Enable RBG compute shader (already verified -1.33ms)
+2. **P1**: Remove dead CPU work (`cell_scroll_data`, `M68KSync()`)
+3. **P2**: SH-2 interpreter threaded dispatch (target -2ms)
+4. **P3**: Memory bus optimization (target -1.5ms)
+5. **P4**: Framebuffer optimizations from this document (target -0.5 to -1ms)
+
+The framebuffer proposals below remain valid as incremental improvements, but they should be
+pursued **after** the CPU emulation thread is addressed. The GPU has 4× headroom — there's no
+framebuffer crisis.
+
+---
+
 ## 1. Overview
 
 The VDP1 framebuffer system is the Saturn's sprite/geometry compositing layer. It sits between VDP1 command processing (sprite/polygon/line drawing) and VDP2 background compositing (which reads the VDP1 framebuffer as a texture to composite sprites over backgrounds). The current implementation uses a **double-buffered OpenGL framebuffer** with a CPU-side shadow copy, plus a complex CPU-write-back path for when the Saturn's SH-2 CPUs directly manipulate the framebuffer.
@@ -120,6 +171,17 @@ These are uploaded in `YglUpdateVdp2Reg()` (ygles.c:3155) and consumed by the fr
 ---
 
 ## 3. Performance Problems
+
+### ⚠️ Context from Empirical Benchmarks
+
+Before diving into framebuffer-specific problems, note the **overall system bottleneck**:
+
+- **CPU emulation thread**: 18.63ms (core_avg) — exceeds 16.66ms frame budget
+- **GPU presentation**: 4.67ms (video_avg) — 4× headroom available
+- **Ratio**: 4:1 CPU-bound
+
+The problems below are real but **incremental** — fixing all of them would save ~0.5-1ms of CPU
+time, while fixing the SH-2 interpreter dispatch would save ~2-3ms. Prioritize accordingly.
 
 ### 3.1 CPU Read-Back is Expensive
 
@@ -284,6 +346,21 @@ The VDP1 framebuffer is always rendered at the Saturn's native resolution (e.g.,
 
 ## 5. Recommended Implementation Order
 
+### ⚠️ Revised Priority (Post-Benchmark)
+
+**The framebuffer is NOT the primary bottleneck.** The CPU emulation thread is (4:1 ratio).
+These framebuffer optimizations should be pursued **after** the CPU thread is addressed.
+
+**Pre-requisite work (do these first, outside this document's scope):**
+1. Enable RBG compute shader by default on RK3326 (verified -1.33ms CPU)
+2. Remove dead `cell_scroll_data` fill in `Vdp2HBlankOUT()` (~0.5-1ms)
+3. Gate `M68KSync()` calls behind `#if !defined(ASYNC_SCSP)` (~0.3-0.5ms)
+4. SH-2 interpreter threaded dispatch (target -2ms)
+5. Memory bus unified dispatch (target -1.5ms)
+
+**After the above, the remaining framebuffer budget is ~0.5-1ms.** Only the highest-impact,
+lowest-risk proposals below are worth implementing.
+
 ### Phase 1: Quick Wins (Low Risk, Immediate Payoff)
 
 1. **Dirty-rect tracking for CPU writes** (part of Proposal A)
@@ -434,14 +511,23 @@ Each phase should be validated against the existing baseline:
 
 | Proposal | Performance Gain | Code Complexity | Regression Risk | Platform Portability |
 |----------|-----------------|-----------------|-----------------|---------------------|
-| A (Lazy + Dirty-Rect) | Medium | Low | Low | High |
-| B (Single-Buffer) | High | Medium | Medium | High |
-| C (Compute Shader) | Very High | Very High | High | Low (GLES 3.1+) |
-| D (Tiled Rendering) | Medium | Medium | Low-Medium | High |
-| E (16-bit Format) | High | High | High | Medium |
-| F (Persistent Mapping) | High | Medium | Medium | Medium (GL 4.4+) |
+| A (Lazy + Dirty-Rect) | Low | Low | Low | High |
+| B (Single-Buffer) | Low | Medium | Medium | High |
+| C (Compute Shader) | Low-Medium | Very High | High | Low (GLES 3.1+) |
+| D (Tiled Rendering) | Low | Medium | Low-Medium | High |
+| E (16-bit Format) | Low-Medium | High | High | Medium |
+| F (Persistent Mapping) | Low-Medium | Medium | Medium | Medium (GL 4.4+) |
 
-**Recommended first step**: Phase 1 (dirty-rect tracking + scissored clears + lazy allocation) — these are safe, well-understood changes that provide immediate benefit and lay the groundwork for the more aggressive optimizations in Phases 2 and 3.
+**Note**: All gains are relative to the ~0.5-1ms framebuffer budget remaining after CPU
+emulation thread optimizations. The GPU has 4× headroom — framebuffer changes are incremental,
+not transformative.
+
+**Recommended first step**: Do NOT start with framebuffer changes. First:
+1. Enable RBG compute shader by default (verified -1.33ms)
+2. Remove dead CPU work (`cell_scroll_data`, `M68KSync()`)
+3. Optimize SH-2 interpreter dispatch (threaded code)
+4. Optimize memory bus (unified dispatch)
+5. **Then** revisit framebuffer proposals if more headroom is needed
 
 ---
 

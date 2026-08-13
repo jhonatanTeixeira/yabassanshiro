@@ -80,7 +80,18 @@ mutex vdp1_clock_mtx;
 // atlas cache can be kept across frames instead of being wiped and rebuilt
 // from scratch. See docs/once_a_frame.md and vidogl.c.
 extern "C" u8 g_Vdp1RamUpdated = 0;
+extern "C" u8 g_Vdp1TextureRamUpdated = 0;
+extern "C" u64 g_Vdp1RamDirtyPages[2] = { 0, 0 };
 
+extern "C" void MarkVdp1RamDirty(u32 addr) {
+   addr &= 0x7FFFF;
+   u32 page = addr >> 12;
+   g_Vdp1RamDirtyPages[page >> 6] |= (1ULL << (page & 63));
+   if (addr >= 0x04000) {
+      g_Vdp1TextureRamUpdated = 1;
+   }
+   g_Vdp1RamUpdated = 1;
+}
 
 void Vdp1_onHblank() {
 #if 0
@@ -128,7 +139,7 @@ extern "C" void FASTCALL Vdp1RamWriteByte(u32 addr, u8 val) {
    addr &= 0x7FFFF;
    T1WriteByte(Vdp1Ram, addr, val);
    vdp1_clock = 0;
-   g_Vdp1RamUpdated = 1;
+   MarkVdp1RamDirty(addr);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -136,7 +147,7 @@ extern "C" void FASTCALL Vdp1RamWriteWord(u32 addr, u16 val) {
    addr &= 0x7FFFF;
    T1WriteWord(Vdp1Ram, addr, val);
    vdp1_clock = 0;
-   g_Vdp1RamUpdated = 1;
+   MarkVdp1RamDirty(addr);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -146,7 +157,7 @@ extern "C" void FASTCALL Vdp1RamWriteLong(u32 addr, u32 val) {
    //LOG("Vdp1RamWriteLong @ %08X", CurrentSH2->regs.PC);
    T1WriteLong(Vdp1Ram, addr, val);
    vdp1_clock = 0;
-   g_Vdp1RamUpdated = 1;
+   MarkVdp1RamDirty(addr);
 }
 
 //////////////////////////////////////////////////////////////////////////////

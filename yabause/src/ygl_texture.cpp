@@ -1,4 +1,4 @@
-﻿/*
+/*
         Copyright 2019 devMiyax(smiyaxdev@gmail.com)
 
 This file is part of YabaSanshiro.
@@ -1142,16 +1142,11 @@ public:
 		  glGetShaderiv(result, GL_INFO_LOG_LENGTH, &length);
 		  GLchar *info = new GLchar[length];
 		  glGetShaderInfoLog(result, length, NULL, info);
-		  YGLDEBUG("[COMPILE] %s\n", info);
-		  FILE * fp = fopen("tmp.cpp", "w");
-			if( fp ) {
-				for (int i = 0; i < count; i++) {
-					fprintf(fp,"%s", prg_strs[i]);
-				}
-				fclose(fp);
-			}
-		  abort();
+		  YGLDEBUG("[COMPILE FAILED] %s\n", info);
 		  delete[] info;
+		  glDeleteShader(result);
+		  if (_Ygl) _Ygl->rbg_use_compute_shader = 0;
+		  return 0;
 	  }
 	  GLuint program = glCreateProgram();
 	  glAttachShader(program, result);
@@ -1163,17 +1158,11 @@ public:
 		  glGetProgramiv(program, GL_INFO_LOG_LENGTH, &length);
 		  GLchar *info = new GLchar[length];
 		  glGetProgramInfoLog(program, length, NULL, info);
-		  YGLDEBUG("[LINK] %s\n", info);
-		  FILE * fp = fopen("tmp.cpp", "w");
-			if( fp ) {
-				for (int i = 0; i < count; i++) {
-					fprintf(fp,"%s", prg_strs[i]);
-				}
-				fclose(fp);
-			}
-		  YabThreadUSleep(1000000);  
-		  abort();
+		  YGLDEBUG("[LINK FAILED] %s\n", info);
 		  delete[] info;
+		  glDeleteProgram(program);
+		  if (_Ygl) _Ygl->rbg_use_compute_shader = 0;
+		  return 0;
 	  }
 	  return program;
   }

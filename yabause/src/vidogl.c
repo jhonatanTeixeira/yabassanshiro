@@ -6222,16 +6222,6 @@ void VIDOGLVdp2DrawStart(void)
   int vdp2_dirty = memcmp(&prev_frame_vdp2regs, &sanitized_vdp2regs, sizeof(Vdp2)) != 0;
   if (vdp2_dirty) prev_frame_vdp2regs = sanitized_vdp2regs;
 
-  // Color RAM changes usually CANNOT invalidate the atlas: the decoders bake
-  // palette INDICES into texels, not colors (Vdp2GetPixel4/8/16bpp emit
-  // cramindex; VDP1COLOR() emits a color index), and the fragment shader
-  // resolves them against cram_tex, which YglOnUpdateColorRamWord already
-  // maintains incrementally. So a palette fade used to nuke the whole atlas
-  // every frame for nothing.
-  // The one exception is special-color-calculation mode 3: Vdp2GetAlpha()
-  // reads Vdp2ColorRamGetColorRaw() and bakes the result into the texel's
-  // alpha byte. Only invalidate on a CRAM change if some layer is actually
-  // in mode 3 (SFCCMD, 2 bits per layer: NBG0..3 at shifts 0/2/4/6, RBG0 at 8).
   int cram_affects_texels = 0;
   {
     const u16 sfccmd = fixVdp2Regs->SFCCMD;
@@ -6242,7 +6232,7 @@ void VIDOGLVdp2DrawStart(void)
   }
 
   int content_dirty =
-       g_Vdp1RamUpdated || A0_Updated || A1_Updated || B0_Updated || B1_Updated
+       g_Vdp1TextureRamUpdated || A0_Updated || A1_Updated || B0_Updated || B1_Updated
     || (Vdp2ColorRamUpdated && cram_affects_texels)
     || !have_prev_frame_regs
     || vdp2_dirty || vdp1_dirty;
@@ -6253,6 +6243,9 @@ void VIDOGLVdp2DrawStart(void)
     YglCacheReset(YglTM);
 
     g_Vdp1RamUpdated = 0;
+    g_Vdp1TextureRamUpdated = 0;
+    g_Vdp1RamDirtyPages[0] = 0;
+    g_Vdp1RamDirtyPages[1] = 0;
     have_prev_frame_regs = 1;
     // prev_frame_vdp2regs/prev_frame_vdp1regs are already updated above
     // (whenever their own sanitized comparison found a difference) -

@@ -122,6 +122,9 @@ extern VideoInterface_struct *VIDCore;
 extern VideoInterface_struct VIDDummy;
 
 extern u8 * Vdp1Ram;
+extern u8 g_Vdp1RamUpdated;
+extern u8 g_Vdp1TextureRamUpdated;
+extern u64 g_Vdp1RamDirtyPages[2];
 
 u8 FASTCALL	Vdp1RamReadByte(u32);
 u16 FASTCALL	Vdp1RamReadWord(u32);

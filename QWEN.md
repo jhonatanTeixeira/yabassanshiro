@@ -165,6 +165,89 @@ The `docs/` directory contains three detailed inventories for the CPU-reduction 
 - **`docs/once_a_frame.md`** — Work redone more often than once a frame (texture caching, SH-2 interpreter dispatch, memory bus, profiler, etc.)
 - **`docs/per_deciline.md`** — Work called per deciline (SCSP busy-spin, atomic ordering, M68KSync dead code, SMPC/CD batching analysis)
 
+## R36S Target Device
+
+The primary deployment target is an **R36S handheld** (RK3326 SoC).
+
+### Device Specs
+
+| Property | Value |
+|----------|-------|
+| SoC | Rockchip RK3326 |
+| CPU | 4× Cortex-A35 @ 1.512 GHz |
+| GPU | Mali-G31 (Bifrost, single-core, GLES 3.0, no compute shaders) |
+| GPU freq | 400 MHz (520 MHz max available) |
+| RAM | 1 GB DDR3 |
+| Kernel | 4.4.189 (Bifrost Mali driver) |
+| Frontend | retrorun3 (lightweight RetroArch alternative) |
+| Core path | `/home/ark/.config/retroarch/cores/yabasanshiro_opt_libretro.so` |
+| ROMs | `/roms2/saturn/` |
+| BIOS | `/roms2/bios/saturn_bios.bin` |
+| IP | `192.168.0.14` (user: `ark`, pass: `ark`) |
+
+### Cross-Compile & Deploy
+
+```sh
+# One-time: generate M68K opcode tables
+make -C yabause/src/libretro generate-files
+
+# Build for R36S (Cortex-A35, Mali-G31, GLES 3.0, AArch64 DRC)
+make -C yabause/src/libretro platform=arm64_cortex_a53_gles3 -j$(nproc)
+
+# Deploy to device
+sshpass -p ark scp yabause/src/libretro/yabasanshiro_libretro.so \
+  ark@192.168.0.14:/home/ark/.config/retroarch/cores/yabasanshiro_opt_libretro.so
+
+# Or use the automated script:
+./scripts/deploy_r36s.sh
+```
+
+The `platform=arm64_cortex_a53_gles3` target sets:
+- `ARCH_IS_LINUX=1`, `FORCE_GLES=1`
+- `USE_AARCH64_DRC=1`, `DYNAREC_DEVMIYAX=1`
+- `-march=armv8-a+crc+fp+simd -mcpu=cortex-a53 -mtune=cortex-a53`
+
+The core is dynamically linked — EGL/GLES libs are resolved at runtime on the device.
+
+### Running on Device
+
+```sh
+# SSH in
+sshpass -p ark ssh ark@192.168.0.14
+
+# Run with retrorun3 (FPS counter on by default in retrorun.cfg)
+sudo perfmax performance /roms2/saturn/game.chd
+retrorun3 -c /home/ark/.config/retrorun.cfg --triggers \
+  -s /roms2/saturn -d /roms2/bios \
+  /home/ark/.config/retroarch/cores/yabasanshiro_opt_libretro.so \
+  /roms2/saturn/game.chd
+```
+
+### GPU Turbo (optional, for extra perf)
+
+```sh
+echo 520000000 > /sys/class/misc/mali0/device/devfreq/ff400000.gpu/max_freq
+echo 520000000 > /sys/class/misc/mali0/device/devfreq/ff400000.gpu/min_freq
+echo userspace > /sys/class/misc/mali0/device/devfreq/ff400000.gpu/governor
+```
+
+### Current Performance Status
+
+*Magic Knight Rayearth (USA)* on R36S with the optimized core:
+- **60 fps** in simple/indoor areas
+- **47–57 fps** in heavy areas (outdoor scenes with RBG rotation + many sprites)
+
+### Next Optimization Priorities
+
+See `docs/r36s_next_moves.md` for full analysis. In priority order:
+
+1. **P0 — GPU max freq** (zero code change, 5-15% gain)
+2. **P1 — Disable ASYNC_SCSP** (comment out `#define ASYNC_SCSP` in `scsp.h:122`, 10-20% gain)
+3. **P2 — Optimize RBG CPU fallback** (no compute shaders on GLES 3.0, 5-25% gain)
+4. **P3 — Texture atlas format/bandwidth** (3-10% gain)
+5. **P4 — SH-2 JIT coverage** (5-15% gain)
+6. **P5 — Memory bus micro-opt** (2-5% gain)
+
 ## Development Conventions
 
 ### Code Style

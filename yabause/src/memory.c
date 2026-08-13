@@ -1,4 +1,4 @@
-﻿/*  Copyright 2005 Guillaume Duhamel
+/*  Copyright 2005 Guillaume Duhamel
     Copyright 2005-2006 Theo Berkau
 
     This file is part of Yabause.
@@ -826,12 +826,16 @@ INLINE int getVramCycle(u32 addr) {
 // that reproduces the exact same per-address classification the switches
 // above used to compute. See docs/once_a_frame.md.
 #define GET_MEM_CYCLE_W \
-  *cycle = WriteCycleList[addr >> 16]; \
-  if (UNLIKELY(*cycle == CYCLE_DYNAMIC_VDP2)) *cycle = getVramCycle(addr);
+  { u32 _c = WriteCycleList[addr >> 16]; \
+    if (UNLIKELY(_c == CYCLE_DYNAMIC_VDP2)) _c = getVramCycle(addr); \
+    if (cycle != NULL) *cycle = _c; \
+    else if (CurrentSH2 != NULL) CurrentSH2->cycles += _c; }
 
 #define GET_MEM_CYCLE_R \
-  *cycle = ReadCycleList[addr >> 16]; \
-  if (UNLIKELY(*cycle == CYCLE_DYNAMIC_VDP2)) *cycle = getVramCycle(addr);
+  { u32 _c = ReadCycleList[addr >> 16]; \
+    if (UNLIKELY(_c == CYCLE_DYNAMIC_VDP2)) _c = getVramCycle(addr); \
+    if (cycle != NULL) *cycle = _c; \
+    else if (CurrentSH2 != NULL) CurrentSH2->cycles += _c; }
 
 #endif
 
