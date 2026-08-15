@@ -5278,6 +5278,19 @@ void M68KExec(s32 cycles)
     }
 }
 
+// TEMPORARY DIAGNOSTIC: counts, per sample, how many of the 32 hardware
+// voice slots are actually producing sound (attenuation below the "fully
+// silent" threshold op1-op5 already early-out on) vs iterated-but-idle, and
+// how many DSP effect program steps run. Read/reset from ScspAsynMainCpuTime
+// once per frame. Distinguishes "more voices genuinely playing" (inherent
+// synthesis cost) from "iterating slots that contribute nothing" (fixable
+// fixed overhead) - see the discussion this is following up on. Remove once
+// root-caused.
+u64 g_dbg_active_slot_sum = 0;
+u64 g_dbg_dsp_step_sum = 0;
+u64 g_dbg_cdda_active_sum = 0;
+u64 g_dbg_sample_count = 0;
+
 void new_scsp_run_sample()
 {
    s32 temp = cdda_next_in - cdda_out_left;
@@ -5296,10 +5309,20 @@ void new_scsp_run_sample()
       cd_in_r = (s16)((buf[3] << 8) | buf[2]);
 
       cdda_out_left -= 4;
+      g_dbg_cdda_active_sum++;
    }
 
    scsp_update_timer(1);
    generate_sample(&new_scsp, scsp.rbp, scsp.rbl, &out_l, &out_r, scsp.mvol, cd_in_l, cd_in_r);
+
+   {
+      int active = 0, i;
+      for (i = 0; i < 32; i++)
+         if (new_scsp.slots[i].state.attenuation < 0x3bf) active++;
+      g_dbg_active_slot_sum += active;
+      g_dbg_dsp_step_sum += scsp_dsp.last_step;
+      g_dbg_sample_count++;
+   }
 
    if (new_scsp_outbuf_pos < 900)
    {
@@ -5519,6 +5542,20 @@ void ScspAsynMainCpuTime( void * p ){
   
   framecnt = 188160; // 11289600/60
 
+  // TEMPORARY DIAGNOSTIC (see matching block in yabause.c's SyncCPUtoSCSP):
+  // splits this thread's per-frame wall-clock time into genuine compute
+  // (inside MM68KExec/new_scsp_exec) vs. time spent sleeping waiting for the
+  // main thread to feed more M68K cycles. If compute alone is near/over the
+  // 16.6ms frame budget, this thread is throughput-bound (needs the
+  // synthesis path itself optimized - no amount of queue slack fixes that);
+  // if compute stays low but wait balloons, this thread is being starved by
+  // the main thread's own pacing instead. Remove once root-caused.
+  u64 dbg_compute_us = 0;
+  u64 dbg_m68k_us = 0;
+  u64 dbg_scsp_us = 0;
+  u64 dbg_wait_us = 0;
+  u64 dbg_t0;
+
   //YabWaitEventQueue(q_scsp_frame_start);
   now = 0;
   before = 0;
@@ -5554,7 +5591,9 @@ void ScspAsynMainCpuTime( void * p ){
         m68k_cycle = m68k_integer_part - pre_m68k_cycle;
         if (thread_running == 0) break;
         if ((m68k_inc + m68k_cycle) >= (u64)samplecnt) break;
+        dbg_t0 = YabauseGetTicks();
         YabThreadUSleep(50);
+        dbg_wait_us += (YabauseGetTicks() - dbg_t0) * 1000000 / yabsys.tickfreq;
       }
     }
 
@@ -5565,13 +5604,18 @@ void ScspAsynMainCpuTime( void * p ){
     while (m68k_inc >= samplecnt) {
       m68k_inc = m68k_inc - samplecnt;
       //LOG("[SCSP] MM68KExec %d", samplecnt);
+      dbg_t0 = YabauseGetTicks();
       MM68KExec(samplecnt);
+      dbg_m68k_us += (YabauseGetTicks() - dbg_t0) * 1000000 / yabsys.tickfreq;
+      dbg_t0 = YabauseGetTicks();
       if (use_new_scsp) {
         new_scsp_exec((samplecnt << 1));
       }
       else {
         scsp_update_timer(1);
       }
+      dbg_scsp_us += (YabauseGetTicks() - dbg_t0) * 1000000 / yabsys.tickfreq;
+      dbg_compute_us = dbg_m68k_us + dbg_scsp_us;
       hzcheck++;
 
       frame += samplecnt;
@@ -5580,6 +5624,23 @@ void ScspAsynMainCpuTime( void * p ){
         ScspInternalVars->scsptiming2 = 0;
         ScspInternalVars->scsptiming1 = scsplines;
         ScspExecAsync();
+
+        {
+          double avg_active = g_dbg_sample_count ? (double)g_dbg_active_slot_sum / g_dbg_sample_count : 0.0;
+          double avg_dsp = g_dbg_sample_count ? (double)g_dbg_dsp_step_sum / g_dbg_sample_count : 0.0;
+          double cdda_pct = g_dbg_sample_count ? 100.0 * (double)g_dbg_cdda_active_sum / g_dbg_sample_count : 0.0;
+          fprintf(stderr, "[SCSP-DIAG] m68k=%llu us scsp=%llu us wait=%llu us avg_active_slots=%.1f/32 avg_dsp_steps=%.1f cdda_active=%.0f%% (frame budget 16666 us)\n",
+                  (unsigned long long)dbg_m68k_us, (unsigned long long)dbg_scsp_us, (unsigned long long)dbg_wait_us,
+                  avg_active, avg_dsp, cdda_pct);
+        }
+        dbg_compute_us = 0;
+        dbg_m68k_us = 0;
+        dbg_scsp_us = 0;
+        dbg_wait_us = 0;
+        g_dbg_cdda_active_sum = 0;
+        g_dbg_active_slot_sum = 0;
+        g_dbg_dsp_step_sum = 0;
+        g_dbg_sample_count = 0;
 
         YabAddEventQueue( q_scsp_finish , 0);
         pre_m68k_cycle = 0;

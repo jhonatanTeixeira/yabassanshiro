@@ -99,11 +99,23 @@ else ifeq ($(platform), arm64)
 	USE_AARCH64_DRC = 1
 	DYNAREC_DEVMIYAX = 1
 
-# Generic AArch64 Cortex-A53 support with GLES 3.0 like Amlogic G12A or Allwinner H616 
+# Generic AArch64 Cortex-A53 support with GLES 3.0 like Amlogic G12A or Allwinner H616
 else ifneq (,$(findstring arm64_cortex_a53_gles3,$(platform)))
 	override platform += unix
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
+	# NOTE: -flto was tried here (measured ~28% cut in SCSP DSP-effects
+	# synthesis cost - op1-op7/ScspDspExec cross scsp.c/scspdsp.c and -O3
+	# alone can't inline across translation units) but reverted: this
+	# codebase has cross-thread state (SCSP/M68K thread, CD read-ahead
+	# worker) shared via plain, non-atomic/non-volatile globals. LTO's
+	# whole-program visibility let it legally treat some of those reads as
+	# loop-invariant and stop observing writes from the other thread,
+	# breaking a dialogue-advance flag (repro: talk to an NPC, the
+	# continue-prompt icon never appears again). Do not re-enable without
+	# first auditing/fixing every plain-global cross-thread flag to use
+	# std::atomic (see Counter.cpp's m68k_counter for the existing correct
+	# pattern) or volatile.
 	SHARED := -shared -Wl,--no-undefined -Wl,--version-script=link.T
 	LDFLAGS += -lpthread
 	ARCH_IS_LINUX = 1

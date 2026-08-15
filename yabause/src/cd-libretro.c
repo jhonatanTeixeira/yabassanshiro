@@ -1761,14 +1761,7 @@ static int ISOCDReadSectorFAD(u32 FAD, void *buffer) {
 	return 1;
 }
 
-//////////////////////////////////////////////////////////////////////////////
-
-static void ISOCDReadAheadFAD(UNUSED u32 FAD)
-{
-	// No-op
-}
-
-//////////////////////////////////////////////////////////////////////////////
+// Async read-ahead implemented below
 
 #define CD_MAX_SECTOR_DATA      (2352)
 #define CD_MAX_SUBCODE_DATA     (96)
@@ -1788,7 +1781,7 @@ static void ISOCDReadAheadFAD(UNUSED u32 FAD)
 // every time either side is read again. Widened to a small multi-slot LRU;
 // even a generous slot count costs only a few hundred KB (hunkbytes is
 // typically ~19.5KB for a CD CHD - 8 sectors/hunk). See docs/once_a_frame.md.
-#define CHD_HUNK_CACHE_SLOTS 64
+#define CHD_HUNK_CACHE_SLOTS 128
 typedef struct ChdInfo_ {
   chd_file *chd;
   core_file * image_file;
@@ -1800,6 +1793,95 @@ typedef struct ChdInfo_ {
 } ChdInfo;
 
 ChdInfo * pChdInfo = NULL;
+
+#include <pthread.h>
+
+static pthread_mutex_t g_chd_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_chd_readahead_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_chd_readahead_cv = PTHREAD_COND_INITIALIZER;
+static u32 g_chd_target_readahead_fad = 0xFFFFFFFF;
+static int g_chd_worker_active = 0;
+static pthread_t g_chd_worker_thread;
+
+static void *ChdWorkerThreadFunc(void *arg) {
+   u32 last_fad = 0xFFFFFFFF;
+   while (g_chd_worker_active) {
+      u32 current_fad = 0xFFFFFFFF;
+      pthread_mutex_lock(&g_chd_readahead_mutex);
+      while (g_chd_worker_active && g_chd_target_readahead_fad == 0xFFFFFFFF) {
+         pthread_cond_wait(&g_chd_readahead_cv, &g_chd_readahead_mutex);
+      }
+      if (!g_chd_worker_active) {
+         pthread_mutex_unlock(&g_chd_readahead_mutex);
+         break;
+      }
+      current_fad = g_chd_target_readahead_fad;
+      g_chd_target_readahead_fad = 0xFFFFFFFF;
+      pthread_mutex_unlock(&g_chd_readahead_mutex);
+
+      if (current_fad != 0xFFFFFFFF && current_fad != last_fad && pChdInfo && pChdInfo->chd) {
+         int ahead;
+         last_fad = current_fad;
+         // Pre-decompress up to 2 upcoming hunks asynchronously into the cache
+         for (ahead = 8; ahead <= 16; ahead += 8) {
+            u32 loglba = current_fad + ahead;
+            u32 physlba = loglba;
+            u32 chdlba = loglba;
+            track_info_struct *track = NULL;
+            int i, j;
+
+            pthread_mutex_lock(&g_chd_cache_mutex);
+            if (!pChdInfo || !pChdInfo->chd) {
+               pthread_mutex_unlock(&g_chd_cache_mutex);
+               break;
+            }
+            for (i = 0; i < disc.session_num; i++) {
+               for (j = 0; j < disc.session[i].track_num; j++) {
+                  if (loglba < disc.session[i].track[j+1].logframeofs) {
+                     physlba = disc.session[i].track[j].physframeofs + (loglba - disc.session[i].track[j].logframeofs);
+                     chdlba = physlba - disc.session[i].track[j].physframeofs + disc.session[i].track[j].chdframeofs;
+                     track = &disc.session[i].track[j];
+                     break;
+                  }
+               }
+            }
+            if (track != NULL) {
+               int hunkid = (chdlba * CD_FRAME_SIZE) / pChdInfo->header->hunkbytes;
+               int slot = -1;
+               for (i = 0; i < CHD_HUNK_CACHE_SLOTS; i++) {
+                  if (pChdInfo->hunk_cache_id[i] == hunkid) { slot = i; break; }
+               }
+               if (slot < 0) {
+                  int lru = 0;
+                  for (i = 1; i < CHD_HUNK_CACHE_SLOTS; i++) {
+                     if (pChdInfo->hunk_cache_age[i] < pChdInfo->hunk_cache_age[lru]) lru = i;
+                  }
+                  chd_read(pChdInfo->chd, hunkid, pChdInfo->hunk_cache_buf[lru]);
+                  pChdInfo->hunk_cache_id[lru] = hunkid;
+                  pChdInfo->hunk_cache_age[lru] = ++pChdInfo->hunk_cache_clock;
+               }
+            }
+            pthread_mutex_unlock(&g_chd_cache_mutex);
+         }
+      }
+   }
+   return NULL;
+}
+
+static void ISOCDReadAheadFAD(u32 FAD)
+{
+   if (!pChdInfo || !pChdInfo->chd) return;
+
+   if (!g_chd_worker_active) {
+      g_chd_worker_active = 1;
+      pthread_create(&g_chd_worker_thread, NULL, ChdWorkerThreadFunc, NULL);
+   }
+
+   pthread_mutex_lock(&g_chd_readahead_mutex);
+   g_chd_target_readahead_fad = FAD;
+   pthread_cond_signal(&g_chd_readahead_cv);
+   pthread_mutex_unlock(&g_chd_readahead_mutex);
+}
 
 static int LoadCHD(const char *chd_filename, RFILE *iso_file)
 {
@@ -1813,7 +1895,7 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   int postgap = 0;
 
   int meta_outlen = 512 * 1024;
-  u8 * buf = malloc(meta_outlen);
+  u8 * buf = (u8 *)malloc(meta_outlen);
   u32 resultlen;
   u32 resulttag;
   u8 resultflags;
@@ -1822,7 +1904,7 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
     free(pChdInfo);
   }
 
-  pChdInfo = malloc(sizeof(ChdInfo));
+  pChdInfo = (ChdInfo *)malloc(sizeof(ChdInfo));
   memset(pChdInfo, 0, sizeof(ChdInfo));
 
   track_info_struct trk[100];
@@ -1844,13 +1926,13 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
     LOG("track info %s", buf);
     switch (resulttag) {
     case CDROM_TRACK_METADATA_TAG:
-      sscanf(buf, CDROM_TRACK_METADATA_FORMAT, &trak_number, track_type, track_subtype, &frame);
+      sscanf((char*)buf, CDROM_TRACK_METADATA_FORMAT, &trak_number, track_type, track_subtype, &frame);
       pregap = 0;
       postgap = 0;
       sprintf(pg_type, "NONE");
       break;
     case CDROM_TRACK_METADATA2_TAG:
-      sscanf(buf, CDROM_TRACK_METADATA2_FORMAT, &trak_number, track_type, track_subtype, &frame, &pregap, pg_type, pg_sub_type, &postgap);
+      sscanf((char*)buf, CDROM_TRACK_METADATA2_FORMAT, &trak_number, track_type, track_subtype, &frame, &pregap, pg_type, pg_sub_type, &postgap);
       break;
     default:
       return -1;
@@ -1938,14 +2020,9 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
     {
       trk[num_tracks].ctl_addr = 0x01;
       trk[num_tracks].sector_size = 2352;
-      //trk[num_tracks].pregap = 0;
     }
    
-    //trk[num_tracks].fad_start = trk[num_tracks].fad_start + pregap;
-    //trk[num_tracks].fad_end = trk[num_tracks].fad_start + (frame - 1) + postgap;
-    //frame = trk[num_tracks].fad_end+1;
     num_tracks++;
-    //trk[num_tracks].fad_start = frame;
   }
   free(buf);
 
@@ -1964,8 +2041,6 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
     trk[i].chdframeofs = chdofs;
     trk[i].logframeofs = logofs;
 
-    //logofs += trk[i].pregap;
-    //logofs += trk[i].postgap;
     logofs += trk[i].frames;
     trk[i].fad_end = logofs;
 
@@ -1978,10 +2053,8 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   trk[i].physframeofs = physofs;
   trk[i].chdframeofs = chdofs;
 
-  //trk[num_tracks - 1].fad_end = (pChdInfo->header->logicalbytes - trk[num_tracks - 1].file_offset) / trk[num_tracks - 1].sector_size;
-
   disc.session_num = 1;
-  disc.session = malloc(sizeof(session_info_struct) * disc.session_num);
+  disc.session = (session_info_struct *)malloc(sizeof(session_info_struct) * disc.session_num);
   if (disc.session == NULL)
   {
     YabSetError(YAB_ERR_MEMORYALLOC, NULL);
@@ -1990,7 +2063,7 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   disc.session[0].fad_start = 150;
   disc.session[0].fad_end = trk[num_tracks - 1].fad_end;
   disc.session[0].track_num = num_tracks;
-  disc.session[0].track = malloc(sizeof(track_info_struct) * disc.session[0].track_num);
+  disc.session[0].track = (track_info_struct *)malloc(sizeof(track_info_struct) * disc.session[0].track_num);
   if (disc.session[0].track == NULL)
   {
     YabSetError(YAB_ERR_MEMORYALLOC, NULL);
@@ -2002,9 +2075,10 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   memcpy(disc.session[0].track, trk, num_tracks * sizeof(track_info_struct));
 
   {
+    pthread_mutex_lock(&g_chd_cache_mutex);
     int i;
     for (i = 0; i < CHD_HUNK_CACHE_SLOTS; i++) {
-      pChdInfo->hunk_cache_buf[i] = malloc(pChdInfo->header->hunkbytes);
+      pChdInfo->hunk_cache_buf[i] = (char *)malloc(pChdInfo->header->hunkbytes);
       pChdInfo->hunk_cache_id[i] = -1;
       pChdInfo->hunk_cache_age[i] = 0;
     }
@@ -2012,6 +2086,7 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
     chd_read(pChdInfo->chd, 0, pChdInfo->hunk_cache_buf[0]);
     pChdInfo->hunk_cache_id[0] = 0;
     pChdInfo->hunk_cache_age[0] = ++pChdInfo->hunk_cache_clock;
+    pthread_mutex_unlock(&g_chd_cache_mutex);
   }
 
   return 0;
@@ -2020,7 +2095,6 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
 
 static int ISOCDReadSectorFADFromCHD(u32 FAD, void *buffer) {
   int i, j;
-  size_t num_read = 0;
   track_info_struct *track = NULL;
   u32 chdlba;
   u32 physlba;
@@ -2031,17 +2105,8 @@ static int ISOCDReadSectorFADFromCHD(u32 FAD, void *buffer) {
   {
     for (j = 0; j < disc.session[i].track_num; j++)
     {
-      //if (j == 1) {
-      //  int a = 0;
-      //}
       if (loglba < disc.session[i].track[j+1].logframeofs) {
-        //if ((loglba > disc.session[i].track[j].pregap)) {
-       //   loglba -= disc.session[i].track[j].pregap;
-       // }
         physlba = disc.session[i].track[j].physframeofs + (loglba - disc.session[i].track[j].logframeofs);
-        //if (disc.session[i].track[j].ctl_addr == 0x01) {
-        //  physlba += disc.session[i].track[j].pregap;
-        //}
         chdlba = physlba - disc.session[i].track[j].physframeofs + disc.session[i].track[j].chdframeofs;
         track = &disc.session[i].track[j];
         break;
@@ -2058,17 +2123,15 @@ static int ISOCDReadSectorFADFromCHD(u32 FAD, void *buffer) {
   int hunkid = (chdlba*CD_FRAME_SIZE) / pChdInfo->header->hunkbytes ;
   int hunk_offset =  (chdlba*CD_FRAME_SIZE) % pChdInfo->header->hunkbytes;
 
-  // Multi-slot LRU hunk cache - see ChdInfo_'s declaration for why a single
-  // slot (the old current_hunk_id) thrashes on alternating read patterns.
   char * hunk_buffer;
   {
+    pthread_mutex_lock(&g_chd_cache_mutex);
     int slot = -1;
     int i;
     for (i = 0; i < CHD_HUNK_CACHE_SLOTS; i++) {
       if (pChdInfo->hunk_cache_id[i] == hunkid) { slot = i; break; }
     }
     if (slot < 0) {
-      // Cache miss - evict the least-recently-used slot.
       int lru = 0;
       for (i = 1; i < CHD_HUNK_CACHE_SLOTS; i++) {
         if (pChdInfo->hunk_cache_age[i] < pChdInfo->hunk_cache_age[lru]) lru = i;
@@ -2079,6 +2142,7 @@ static int ISOCDReadSectorFADFromCHD(u32 FAD, void *buffer) {
     }
     pChdInfo->hunk_cache_age[slot] = ++pChdInfo->hunk_cache_clock;
     hunk_buffer = pChdInfo->hunk_cache_buf[slot];
+    pthread_mutex_unlock(&g_chd_cache_mutex);
   }
 
   if (track->ctl_addr == 0x01) {

@@ -44,6 +44,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 
 
 #include <sys/types.h>
+#include <stdio.h>
 #ifdef WIN32
 #include <windows.h>
 #endif
@@ -996,7 +997,19 @@ int YabauseEmulate(void) {
 void SyncCPUtoSCSP() {
   //LOG("[SH2] WAIT SCSP");
   if (g_scsp_main_mode == 0) {
+    // TEMPORARY DIAGNOSTIC (see matching block in scsp.c's ScspAsynMainCpuTime):
+    // measures how long the MAIN thread actually blocks here waiting for the
+    // SCSP/M68K thread to finish the previous frame's audio, to tell apart a
+    // one-off scheduling stall (fixed by more queue slack) from the SCSP
+    // thread's own synthesis work being sustainedly too slow (not fixable by
+    // buffering at all). Remove once root-caused.
+    u64 dbg_t0 = YabauseGetTicks();
     YabWaitEventQueue(q_scsp_finish);
+    u64 dbg_wait_us = (YabauseGetTicks() - dbg_t0) * 1000000 / yabsys.tickfreq;
+    if (dbg_wait_us > 2000) {
+      fprintf(stderr, "[SCSP-DIAG] main thread blocked %llu us waiting for audio (frame budget 16666 us)\n",
+              (unsigned long long)dbg_wait_us);
+    }
     saved_m68k_cycles = 0;
     setM68kCounter(saved_m68k_cycles);
     YabAddEventQueue(q_scsp_frame_start, 0);
