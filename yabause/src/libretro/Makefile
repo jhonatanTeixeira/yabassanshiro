@@ -59,8 +59,20 @@ CC_AS ?= $(CC)
 ifneq (,$(findstring unix,$(platform)))
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
+	# -flto: this build has no dynarec (plain SH-2 interpreter), so it's not
+	# exposed to the DynarecSh2.cpp interrupt-delivery race that was the other
+	# LTO-unsafe surface on ARM targets - the SCSP/M68K-thread and CD
+	# read-ahead-worker cross-thread globals fixed for arm64_cortex_a53_gles3
+	# below (see its comment) are the same fix here, and this target is fully
+	# exercisable locally (ASYNC_SCSP runs even on platform=unix) to verify
+	# them, unlike the ARM dynarec targets. Needed at both compile time
+	# (FLAGS, below) AND link time (LDFLAGS) - GCC emits "fat" LTO objects by
+	# default, so without -flto at the link step it silently falls back to the
+	# plain (non-LTO'd) code section instead of erroring, which would look
+	# like a working build that never actually exercises the win this is for.
+	FLAGS += -flto
 	SHARED := -shared -Wl,--no-undefined -Wl,--version-script=link.T
-	LDFLAGS += -lpthread
+	LDFLAGS += -lpthread -flto
 	ARCH_IS_LINUX = 1
 	# ARM
 	ifneq (,$(findstring armv,$(platform)))
@@ -104,20 +116,32 @@ else ifneq (,$(findstring arm64_cortex_a53_gles3,$(platform)))
 	override platform += unix
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
-	# NOTE: -flto was tried here (measured ~28% cut in SCSP DSP-effects
-	# synthesis cost - op1-op7/ScspDspExec cross scsp.c/scspdsp.c and -O3
-	# alone can't inline across translation units) but reverted: this
-	# codebase has cross-thread state (SCSP/M68K thread, CD read-ahead
-	# worker) shared via plain, non-atomic/non-volatile globals. LTO's
-	# whole-program visibility let it legally treat some of those reads as
-	# loop-invariant and stop observing writes from the other thread,
-	# breaking a dialogue-advance flag (repro: talk to an NPC, the
-	# continue-prompt icon never appears again). Do not re-enable without
-	# first auditing/fixing every plain-global cross-thread flag to use
-	# std::atomic (see Counter.cpp's m68k_counter for the existing correct
-	# pattern) or volatile.
+	# -flto: re-enabled. Was tried here originally (measured ~28% cut in SCSP
+	# DSP-effects synthesis cost - op1-op7/ScspDspExec cross scsp.c/scspdsp.c,
+	# -O3 alone can't inline across translation units) but reverted: this
+	# codebase had cross-thread state (SCSP/M68K thread, CD read-ahead worker,
+	# and - the actual root cause of the reported bug - the SH-2 dynarec's
+	# interrupt-delivery path in DynarecSh2.cpp, which only this and other
+	# dynarec-enabled ARM targets exercise) shared via plain, non-atomic/
+	# non-volatile globals or unguarded reads. LTO's whole-program visibility
+	# let it legally treat some of those reads as loop-invariant and stop
+	# observing writes from another thread, breaking a dialogue-advance flag
+	# (repro: talk to an NPC, the continue-prompt icon never appears again -
+	# consistent with a permanently-hoisted read of DynarecSh2::CheckInterupt's
+	# pending-interrupt gate, not an intermittent race). Fixed by: converting
+	# every plain-global cross-thread flag in scsp.c/scspdsp.h/cd-libretro.c to
+	# C11 _Atomic (matching Counter.cpp's m68k_counter as the existing
+	# std::atomic reference pattern for the handful of C++ sites), and adding
+	# a dedicated std::atomic<bool> gate (DynarecSh2.h's
+	# m_bHasPendingInterrupt) so DynarecSh2::Execute()/CheckInterupt() never
+	# read the interrupt table/SysReg[5] without either that atomic gate or
+	# mtx_ having been consulted. Before landing any further changes near
+	# either of those files, re-verify both still hold - see the LTO-safety
+	# plan (docs/ or session history) for the full per-variable audit and
+	# memory-ordering rationale.
+	FLAGS += -flto
 	SHARED := -shared -Wl,--no-undefined -Wl,--version-script=link.T
-	LDFLAGS += -lpthread
+	LDFLAGS += -lpthread -flto
 	ARCH_IS_LINUX = 1
 	HAVE_SSE = 0
 	FORCE_GLES = 1

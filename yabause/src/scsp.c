@@ -155,12 +155,34 @@ pthread_cond_t  sync_cnd = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t sync_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
+// use_new_scsp is `extern int` in scsp.h (yabause.c and the Qt frontend's
+// UIYabause.cpp read it directly, outside this file) - can't retype it to
+// _Atomic without risking those other translation units, one of which isn't
+// even a C11/C++11-atomics-aware compile (the Qt build). Left as plain `int`;
+// its own hot-path cross-thread reads inside THIS file go through
+// __atomic_load_n/__atomic_store_n instead (see uses below) - those work on
+// an ordinarily-typed object, no header/ABI change needed. Every other flag
+// on this page is scsp.c-internal (confirmed via a repo-wide grep - nothing
+// outside this file references them), so those get the simpler _Atomic
+// type-declaration treatment matching m68kcycle below.
 int use_new_scsp = 0;
 int new_scsp_outbuf_pos = 0;
 s32 new_scsp_outbuf_l[900] = { 0 };
 s32 new_scsp_outbuf_r[900] = { 0 };
 int new_scsp_cycles = 0;
+#if defined(__GNUC__)
+#include <stdatomic.h>
+// The exact shape of the LTO bug described in libretro/Makefile's
+// arm64_cortex_a53_gles3 comment: a busy-wait (`while (g_scsp_lock) ...`,
+// see below) on a plain int with no atomic/volatile qualifier. Gates
+// visibility of the bulk new_scsp/scsp_dsp/IsM68KRunning/use_new_scsp state
+// written during save/load-state (SoundSaveState/SoundLoadState) - release/
+// acquire, not relaxed, so the SCSP thread is guaranteed to see all of that
+// once it observes the unlock.
+_Atomic int g_scsp_lock = 0;
+#else
 int g_scsp_lock = 0;
+#endif
 YabMutex * g_scsp_mtx = NULL;
 static int g_scsp_sync_count_per_frame = 1;
 static int g_scsp_main_mode = 0;
@@ -168,7 +190,6 @@ static int g_scsp_main_mode = 0;
 #include "sh2core.h"
 
 #if defined(__GNUC__)
-#include <stdatomic.h>
 _Atomic u32 m68kcycle = 0;
 #else
 u32 m68kcycle = 0;
@@ -268,50 +289,73 @@ const u16 envelope_table[][8] =
 };
 
 //unknown stored bits are unknown1-5
+// SlotRegs fields are written by scsp_slot_write_byte/word (SH2 MMIO
+// dispatch, main thread) and read every audio sample by op1-op7/
+// generate_sample (SCSP thread) - part of the same "new_scsp struct"
+// cross-thread surface the LTO-safety plan flags, distinct from ScspDsp
+// (scspdsp.h). _Atomic per field rather than a single flag: unlike the DSP
+// program upload (gated by ScspDsp.updated), individual register writes take
+// effect immediately on real hardware too, so there's no natural single
+// "ready" flag here - each field just needs to not be a plain global the
+// compiler can cache across generate_sample's hot loop. SlotState (below)
+// is NOT converted here - confirmed by grep to be touched only by
+// op1-op7/generate_sample/new_scsp_reset, i.e. same-thread (SCSP) in the
+// steady state. NOTE: new_scsp_reset() bulk-memsets the whole struct
+// (SlotRegs included) from ScspReset(), reachable from the main thread via
+// SMPC reset handling with no surrounding lock - a real but separate,
+// pre-existing race (not an LTO-hoisting hazard, a genuine concurrent-memset
+// vs in-flight-synthesis race), out of scope for this pass. Flagged, not
+// fixed here.
+#if defined(__GNUC__)
+#define SCSP_REG_ATOMIC(T) _Atomic T
+#else
+#define SCSP_REG_ATOMIC(T) T
+#endif
+
 struct SlotRegs
 {
-   u8 kx;
-   u8 kb;
-   u8 sbctl;
-   u8 ssctl;
-   u8 lpctl;
-   u8 pcm8b;
-   u32 sa;
-   u16 lsa;
-   u16 lea;
-   u8 d2r;
-   u8 d1r;
-   u8 hold;
-   u8 ar;
-   u8 unknown1;
-   u8 ls;
-   u8 krs;
-   u8 dl;
-   u8 rr;
-   u8 unknown2;
-   u8 si;
-   u8 sd;
-   u16 tl;
-   u8 mdl;
-   u8 mdxsl;
-   u8 mdysl;
-   u8 unknown3;
-   u8 oct;
-   u8 unknown4;
-   u16 fns;
-   u8 re;
-   u8 lfof;
-   u8 plfows;
-   u8 plfos;
-   u8 alfows;
-   u8 alfos;
-   u8 unknown5;
-   u8 isel;
-   u8 imxl;
-   u8 disdl;
-   u8 dipan; 
-   u8 efsdl;
-   u8 efpan;
+   SCSP_REG_ATOMIC(u8) kx;
+   SCSP_REG_ATOMIC(u8) kb;
+   SCSP_REG_ATOMIC(u8) sbctl;
+   SCSP_REG_ATOMIC(u8) ssctl;
+   SCSP_REG_ATOMIC(u8) lpctl;
+   SCSP_REG_ATOMIC(u8) pcm8b;
+   SCSP_REG_ATOMIC(u32) sa;
+   SCSP_REG_ATOMIC(u16) lsa;
+   SCSP_REG_ATOMIC(u16) lea;
+   SCSP_REG_ATOMIC(u8) d2r;
+   SCSP_REG_ATOMIC(u8) d1r;
+   SCSP_REG_ATOMIC(u8) hold;
+   SCSP_REG_ATOMIC(u8) ar;
+   SCSP_REG_ATOMIC(u8) unknown1;
+   SCSP_REG_ATOMIC(u8) ls;
+   SCSP_REG_ATOMIC(u8) krs;
+   SCSP_REG_ATOMIC(u8) dl;
+   SCSP_REG_ATOMIC(u8) rr;
+   SCSP_REG_ATOMIC(u8) unknown2;
+   SCSP_REG_ATOMIC(u8) si;
+   SCSP_REG_ATOMIC(u8) sd;
+   SCSP_REG_ATOMIC(u16) tl;
+   SCSP_REG_ATOMIC(u8) mdl;
+   SCSP_REG_ATOMIC(u8) mdxsl;
+   SCSP_REG_ATOMIC(u8) mdysl;
+   SCSP_REG_ATOMIC(u8) unknown3;
+   SCSP_REG_ATOMIC(u8) oct;
+   SCSP_REG_ATOMIC(u8) unknown4;
+   SCSP_REG_ATOMIC(u16) fns;
+   SCSP_REG_ATOMIC(u8) re;
+   SCSP_REG_ATOMIC(u8) lfof;
+   SCSP_REG_ATOMIC(u8) plfows;
+   SCSP_REG_ATOMIC(u8) plfos;
+   SCSP_REG_ATOMIC(u8) alfows;
+   SCSP_REG_ATOMIC(u8) alfos;
+   SCSP_REG_ATOMIC(u8) unknown5;
+   SCSP_REG_ATOMIC(u8) isel;
+   SCSP_REG_ATOMIC(u8) imxl;
+   SCSP_REG_ATOMIC(u8) disdl;
+   SCSP_REG_ATOMIC(u8) dipan;
+   SCSP_REG_ATOMIC(u8) efsdl;
+   SCSP_REG_ATOMIC(u8) efpan;
 };
 
 struct SlotState
@@ -1805,8 +1849,26 @@ static scsp_t   scsp;                         // SCSP structure
 static union {
    u8 data[CDDA_NUM_BUFFERS*2352];
 } cddabuf;
+// Written by ScspReceiveCDDA() (main thread, via cs2.c's CD-block emulation);
+// read/decremented by both scsp_update() and new_scsp_run_sample() (the old
+// and new synth engines - only one runs at a time depending on
+// use_new_scsp, both on the SCSP thread). cdda_out_left is a genuine
+// bidirectional counter (incremented by the producer, decremented by the
+// consumer), not a one-way ready-flag - _Atomic is enough here since C11's
+// compound-assignment operators (+=/-=, used at every touch site already)
+// perform a real atomic read-modify-write on an _Atomic-qualified object, no
+// call-site rewrite to atomic_fetch_add/sub needed. cddabuf.data itself (the
+// PCM bytes) stays a plain buffer - the two atomic indices already bound the
+// consumer to never read past what's been produced, so torn reads of
+// individual sample bytes can't happen from that gate, and a few
+// milliseconds of audio staleness at the boundary is inaudible regardless.
+#if defined(__GNUC__)
+static _Atomic unsigned int cdda_next_in=0;       // Next sector buffer offset to receive into
+static _Atomic u32 cdda_out_left;                 // Bytes of CDDA left to output
+#else
 static unsigned int cdda_next_in=0;               // Next sector buffer offset to receive into
 static u32 cdda_out_left;                       // Bytes of CDDA left to output
+#endif
 
 ////////////////////////////////////////////////////////////////
 
@@ -1821,7 +1883,15 @@ static void scsp_slot_update_keyon(slot_t *slot);
 
 static int scsp_mute_flags = 0;
 static int scsp_volume = 100;
+// Shutdown-signal flag: main thread writes 0/1 (ScspInit/ScspDeInit/
+// ScspExec), SCSP thread spins on it (ScspAsynMainCpuTime/Realtime's outer
+// `while (thread_running)`, plus the inner re-check inside the wait loop).
+// Same LTO-hazard shape as g_scsp_lock above.
+#if defined(__GNUC__)
+static _Atomic int thread_running = 0;
+#else
 static int thread_running = 0;
+#endif
 static int scsp_sample_count = 0;
 static int scsp_checktime = 0;
 ////////////////////////////////////////////////////////////////
@@ -4772,7 +4842,15 @@ scsp_alloc_bufs (void)
   return 0;
 }
 
+// Written by M68KStart/M68KStop on the main thread (driven by SMPC reset
+// handling), read on the SCSP thread inside MM68KExec's hot per-sample path -
+// see the g_scsp_lock comment above for the general LTO-hazard shape this
+// and the other flags on this page share.
+#if defined(__GNUC__)
+static _Atomic u8 IsM68KRunning;
+#else
 static u8 IsM68KRunning;
+#endif
 static s32 FASTCALL (*m68kexecptr)(s32 cycles);  // M68K->Exec or M68KExecBP
 static s32 savedcycles;  // Cycles left over from the last M68KExec() call
 
@@ -5608,7 +5686,21 @@ void ScspAsynMainCpuTime( void * p ){
       MM68KExec(samplecnt);
       dbg_m68k_us += (YabauseGetTicks() - dbg_t0) * 1000000 / yabsys.tickfreq;
       dbg_t0 = YabauseGetTicks();
+      // use_new_scsp read on the SCSP thread - see its declaration above for
+      // why this specific read (not the MMIO-handler reads elsewhere in this
+      // file, which are main-thread-only) needs the explicit atomic builtin
+      // rather than relying on g_scsp_lock's ordering: g_scsp_lock's
+      // release/acquire pair guarantees the VALUE is correct once re-read,
+      // but says nothing to the compiler about whether THIS read may be
+      // hoisted/cached across loop iterations - only marking the read itself
+      // atomic does that. ScspAsynMainRealtime's parallel reads are dead code
+      // in this build (g_scsp_main_mode is hardcoded 0, libretro.c) and were
+      // left alone.
+#if defined(__GNUC__)
+      if (__atomic_load_n(&use_new_scsp, __ATOMIC_RELAXED)) {
+#else
       if (use_new_scsp) {
+#endif
         new_scsp_exec((samplecnt << 1));
       }
       else {
@@ -5873,7 +5965,14 @@ void ScspExecAsync() {
      bufR = (s32 *)&scspchannel[1].data32[scspsoundgenpos];
      memset(bufL, 0, sizeof(u32) * scspsoundlen);
      memset(bufR, 0, sizeof(u32) * scspsoundlen);
+     // ScspExecAsync() runs on the SCSP thread (called from
+     // ScspAsynMainCpuTime) - see the use_new_scsp comment further up for why
+     // this needs the explicit atomic builtin.
+#if defined(__GNUC__)
+     if (__atomic_load_n(&use_new_scsp, __ATOMIC_RELAXED))
+#else
      if (use_new_scsp)
+#endif
         new_scsp_update_samples(bufL, bufR, scspsoundlen);
      else
         scsp_update(bufL, bufR, scspsoundlen);
@@ -5905,7 +6004,11 @@ void ScspExecAsync() {
 #endif
   }
 
+#if defined(__GNUC__)
+  if (!__atomic_load_n(&use_new_scsp, __ATOMIC_RELAXED))
+#else
   if (!use_new_scsp)
+#endif
      scsp_update_monitor();
 
 #ifdef USE_SCSPMIDI

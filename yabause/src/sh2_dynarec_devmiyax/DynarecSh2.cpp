@@ -1534,7 +1534,12 @@ inline int DynarecSh2::Execute(){
   ((dynaFunc)((void*)(pBlock->code)))(m_pDynaSh2);
 #endif
   
-  if ((GET_SR() & 0xF0) < GET_ICOUNT()) {
+  // m_bHasPendingInterrupt is the cheap fast-path gate (see its declaration in
+  // DynarecSh2.h) - GET_ICOUNT() (a plain read of SysReg[5]) is only reached
+  // once that gate says something's actually pending, same as before this
+  // fix; CheckInterupt() re-verifies everything correctly under mtx_ from
+  // there.
+  if (m_bHasPendingInterrupt.load(std::memory_order_acquire) && (GET_SR() & 0xF0) < GET_ICOUNT()) {
     this->CheckInterupt();
   }
 
@@ -1559,8 +1564,8 @@ bool operator == (const dIntcTbl & data1 , const dIntcTbl & data2 )
 
 void DynarecSh2::RemoveInterrupt(u8 Vector, u8 level) {
   YabThreadLock(mtx_);
-  m_IntruptTbl.remove_if([&](const dIntcTbl & n) { 
-    return n.Vector == Vector; 
+  m_IntruptTbl.remove_if([&](const dIntcTbl & n) {
+    return n.Vector == Vector;
   });
   if (m_IntruptTbl.size() != 0) {
     m_IntruptTbl.sort();
@@ -1569,6 +1574,10 @@ void DynarecSh2::RemoveInterrupt(u8 Vector, u8 level) {
   else {
     m_pDynaSh2->SysReg[5] = 0x0000;
   }
+  // See m_bHasPendingInterrupt's declaration (DynarecSh2.h) - kept in lockstep
+  // with SysReg[5] here, under the same lock, so Execute()/CheckInterupt()'s
+  // unlocked fast-path gate never goes stale.
+  m_bHasPendingInterrupt.store(m_IntruptTbl.size() != 0, std::memory_order_release);
   YabThreadUnLock(mtx_);
 }
 
@@ -1593,6 +1602,12 @@ void DynarecSh2::AddInterrupt( u8 Vector, u8 level )
   }
   m_bIntruptSort = true;
   m_pDynaSh2->SysReg[5] = m_IntruptTbl.begin()->level<<4;
+  // Publish "there's at least one pending interrupt" for Execute()'s unlocked
+  // gate - this is the write half of the actual cross-thread fix (this
+  // function is typically called from the SCSP/M68K audio thread delivering a
+  // sound-timer interrupt, while Execute() runs on this core's own thread).
+  // See m_bHasPendingInterrupt's declaration in DynarecSh2.h.
+  m_bHasPendingInterrupt.store(true, std::memory_order_release);
   YabThreadUnLock(mtx_);
 }
 
@@ -1601,13 +1616,17 @@ int DynarecSh2::CheckInterupt(){
 
   interruput_chk_cnt_++;
 
-  if( m_IntruptTbl.size() == 0 ) {
+  // Was `if (m_IntruptTbl.size() == 0) return 0;` here, read with no lock at
+  // all - undefined behavior independent of LTO (another thread's
+  // AddInterrupt/RemoveInterrupt can be mutating this std::list concurrently),
+  // and exactly the kind of read `-flto` is free to hoist/cache forever once
+  // it can see both this function and AddInterrupt() at once. Replaced with
+  // the atomic gate; the real dequeue below is unchanged, still under mtx_.
+  if (!m_bHasPendingInterrupt.load(std::memory_order_acquire)) {
     return 0;
   }
 
-  
-    
-  YabThreadLock(mtx_);  
+  YabThreadLock(mtx_);
   dlstIntct::iterator pos = m_IntruptTbl.begin();
   if( InterruptRutine((*pos).Vector, (*pos).level ) != 0 ) {
     m_IntruptTbl.pop_front();
@@ -1616,6 +1635,7 @@ int DynarecSh2::CheckInterupt(){
     }else{
       m_pDynaSh2->SysReg[5] = 0x0000;
     }
+    m_bHasPendingInterrupt.store(m_IntruptTbl.size() != 0, std::memory_order_release);
     YabThreadUnLock(mtx_);
     return 1;
   }

@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 #ifndef _DYNAREC_SH2_H_
 #define _DYNAREC_SH2_H_
 
+#include <atomic>
 #include <list>
 #include <map>
 #include <string>
@@ -292,6 +293,26 @@ protected:
   SH2_struct * ctx_;
   YabMutex * mtx_;
   bool logenable_;
+
+  // Set/cleared under mtx_ alongside SysReg[5] in AddInterrupt/RemoveInterrupt/
+  // CheckInterupt, but read WITHOUT the lock as a fast-path gate in Execute()
+  // and at the top of CheckInterupt() - both run on this core's own execution
+  // thread (the main thread for MSH2), while AddInterrupt() is called from the
+  // SCSP/M68K audio thread delivering a sound-timer interrupt (see scu.c's
+  // ScuSendSoundRequest -> SH2SendInterrupt path), so this genuinely crosses
+  // threads on every interrupt delivery - up to ~44100x/sec if a game enables
+  // the sample-tick interrupt. Deliberately a separate field from SysReg[],
+  // not SysReg[5]/GET_ICOUNT() itself: SysReg[0-4] (MACH/MACL/PR/PC/COUNT) are
+  // genuine CPU registers manipulated by JIT-compiled block code, and while
+  // SysReg[5] itself is confirmed untouched by any compiled block (only these
+  // three methods ever write it, always under mtx_), keeping this flag
+  // entirely separate means never having to re-verify that as codegen
+  // changes. See docs (or the LTO-safety plan) for the full trace: this is
+  // the most likely cause of a game's UI-advance flag getting stuck forever
+  // when -flto is enabled, since a hoisted/cached "no interrupt pending" read
+  // here means the corresponding ISR never runs again for the rest of the
+  // session - not a rare race, a permanent one.
+  std::atomic<bool> m_bHasPendingInterrupt{false};
 
   u32 pre_cnt_;
   u32 interruput_chk_cnt_;

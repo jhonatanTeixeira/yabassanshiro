@@ -41,10 +41,34 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 
 #include "core.h"
 
+#if defined(__GNUC__)
+#include <stdatomic.h>
+#endif
+
+// coef/madrs and `updated` (below) are written by DSP program/coefficient
+// MMIO writes (scsp.c's scsp_w_b/w_w, main thread - SH2 writing to the DSP
+// registers) and read every DSP step inside ScspDspExec (scspdsp.c, SCSP
+// thread) - this struct is the exact subsystem the LTO-safety Makefile
+// comment names (op1-op7/ScspDspExec). coef/madrs change "live" every sample
+// by hardware design (not gated by `updated`, unlike mpro[] below) - the risk
+// here isn't staleness, it's the compiler proving these array elements are
+// invariant across ScspDspExec's hot loop and caching them forever once it
+// can see both this struct's writer and reader at once (LTO). This struct is
+// confirmed scsp.c/scspdsp.c-internal - nothing outside those two files (and
+// this header) references it, so no cross-TU/ABI risk from changing these
+// types. Not part of any bulk memcpy/struct-assignment of ScspDsp either
+// (checked), so the plain aggregate `= {0}` init at this type's one instance
+// (yabause.c's `ScspDsp scsp_dsp`) stays valid.
+#if defined(__GNUC__)
+#define SCSPDSP_ATOMIC(T) _Atomic T
+#else
+#define SCSPDSP_ATOMIC(T) T
+#endif
+
 typedef struct
 {
-   u16 coef[64];
-   u16 madrs[32];
+   SCSPDSP_ATOMIC(u16) coef[64];
+   SCSPDSP_ATOMIC(u16) madrs[32];
    u64 mpro[128];
    s32 temp[128];
    s32 mems[32];
@@ -75,7 +99,11 @@ typedef struct
    u32 io_addr;
    int need_write;
    u16 write_data;
-   int updated;
+   // Set by the main thread after writing mpro[] (a DSP program upload isn't
+   // gated per-instruction like coef/madrs above - the whole program is
+   // written first, then this flag publishes it), read-and-cleared once by
+   // ScspDspExec on the SCSP thread. See this struct's own doc comment above.
+   SCSPDSP_ATOMIC(int) updated;
    int last_step;
 
    s64 product;

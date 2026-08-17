@@ -1795,23 +1795,41 @@ typedef struct ChdInfo_ {
 ChdInfo * pChdInfo = NULL;
 
 #include <pthread.h>
+#if defined(__GNUC__)
+#include <stdatomic.h>
+#endif
 
 static pthread_mutex_t g_chd_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_chd_readahead_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_chd_readahead_cv = PTHREAD_COND_INITIALIZER;
 static u32 g_chd_target_readahead_fad = 0xFFFFFFFF;
+// Read/written on both the main thread (ISOCDReadAheadFAD) and the worker
+// thread it starts (ChdWorkerThreadFunc), with no mutex around either side -
+// under LTO the compiler is free to treat the worker's `while
+// (g_chd_worker_active)` as loop-invariant (nothing it can see writes this
+// from inside the loop) and never re-read it, which would keep the worker
+// thread alive forever after shutdown. _Atomic (same pattern as scsp.c's
+// m68kcycle) is enough to fix that: the payload this flag gates
+// (g_chd_target_readahead_fad) is already protected for real by
+// g_chd_readahead_mutex/g_chd_readahead_cv below, so relaxed ordering is fine
+// here - we only need "don't cache this read", not a synchronization edge.
+#if defined(__GNUC__)
+static _Atomic int g_chd_worker_active = 0;
+#else
 static int g_chd_worker_active = 0;
+#endif
 static pthread_t g_chd_worker_thread;
 
 static void *ChdWorkerThreadFunc(void *arg) {
    u32 last_fad = 0xFFFFFFFF;
-   while (g_chd_worker_active) {
+   while (atomic_load_explicit(&g_chd_worker_active, memory_order_relaxed)) {
       u32 current_fad = 0xFFFFFFFF;
       pthread_mutex_lock(&g_chd_readahead_mutex);
-      while (g_chd_worker_active && g_chd_target_readahead_fad == 0xFFFFFFFF) {
+      while (atomic_load_explicit(&g_chd_worker_active, memory_order_relaxed) &&
+             g_chd_target_readahead_fad == 0xFFFFFFFF) {
          pthread_cond_wait(&g_chd_readahead_cv, &g_chd_readahead_mutex);
       }
-      if (!g_chd_worker_active) {
+      if (!atomic_load_explicit(&g_chd_worker_active, memory_order_relaxed)) {
          pthread_mutex_unlock(&g_chd_readahead_mutex);
          break;
       }
@@ -1819,6 +1837,13 @@ static void *ChdWorkerThreadFunc(void *arg) {
       g_chd_target_readahead_fad = 0xFFFFFFFF;
       pthread_mutex_unlock(&g_chd_readahead_mutex);
 
+      // pChdInfo/->chd and disc are also written by LoadCHD() on the main
+      // thread (a disc swap while this worker is alive) - take
+      // g_chd_cache_mutex for the whole pChdInfo-touching block below,
+      // including this initial gate check, not just the hunk-cache bookkeeping
+      // further down. LoadCHD() now takes the same mutex around its
+      // free/realloc/chd_open/disc-population sequence (see LoadCHD()).
+      pthread_mutex_lock(&g_chd_cache_mutex);
       if (current_fad != 0xFFFFFFFF && current_fad != last_fad && pChdInfo && pChdInfo->chd) {
          int ahead;
          last_fad = current_fad;
@@ -1830,9 +1855,7 @@ static void *ChdWorkerThreadFunc(void *arg) {
             track_info_struct *track = NULL;
             int i, j;
 
-            pthread_mutex_lock(&g_chd_cache_mutex);
             if (!pChdInfo || !pChdInfo->chd) {
-               pthread_mutex_unlock(&g_chd_cache_mutex);
                break;
             }
             for (i = 0; i < disc.session_num; i++) {
@@ -1861,9 +1884,9 @@ static void *ChdWorkerThreadFunc(void *arg) {
                   pChdInfo->hunk_cache_age[lru] = ++pChdInfo->hunk_cache_clock;
                }
             }
-            pthread_mutex_unlock(&g_chd_cache_mutex);
          }
       }
+      pthread_mutex_unlock(&g_chd_cache_mutex);
    }
    return NULL;
 }
@@ -1872,8 +1895,8 @@ static void ISOCDReadAheadFAD(u32 FAD)
 {
    if (!pChdInfo || !pChdInfo->chd) return;
 
-   if (!g_chd_worker_active) {
-      g_chd_worker_active = 1;
+   if (!atomic_load_explicit(&g_chd_worker_active, memory_order_relaxed)) {
+      atomic_store_explicit(&g_chd_worker_active, 1, memory_order_relaxed);
       pthread_create(&g_chd_worker_thread, NULL, ChdWorkerThreadFunc, NULL);
    }
 
@@ -1900,6 +1923,19 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   u32 resulttag;
   u8 resultflags;
 
+  track_info_struct trk[100];
+  memset(trk, 0, sizeof(trk));
+
+  int num_tracks = 0;
+
+  // pChdInfo (free+realloc here) and its ->chd/->header are read by
+  // ChdWorkerThreadFunc() on the CD read-ahead thread, which may already be
+  // alive if this is a disc swap mid-session, not just the first load. Take
+  // g_chd_cache_mutex for the whole teardown+rebuild so the worker never sees
+  // a half-built pChdInfo (freed-but-not-yet-realloced, or realloced-but-chd-
+  // not-yet-opened). See the matching lock in ChdWorkerThreadFunc().
+  pthread_mutex_lock(&g_chd_cache_mutex);
+
   if (pChdInfo != NULL) {
     free(pChdInfo);
   }
@@ -1907,17 +1943,14 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   pChdInfo = (ChdInfo *)malloc(sizeof(ChdInfo));
   memset(pChdInfo, 0, sizeof(ChdInfo));
 
-  track_info_struct trk[100];
-  memset(trk, 0, sizeof(trk));
-
-  int num_tracks = 0;
-
   chd_error error = chd_open(chd_filename, CHD_OPEN_READ, NULL, &pChdInfo->chd);
   if (error != CHDERR_NONE) {
+    pthread_mutex_unlock(&g_chd_cache_mutex);
     return -1;
   }
 
   pChdInfo->header = chd_get_header(pChdInfo->chd);
+  pthread_mutex_unlock(&g_chd_cache_mutex);
 
   trk[num_tracks].fad_start = frame + pregap + 150;
   
@@ -2053,10 +2086,17 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   trk[i].physframeofs = physofs;
   trk[i].chdframeofs = chdofs;
 
+  // `disc` (global) is also read by ChdWorkerThreadFunc() on the CD
+  // read-ahead thread (under g_chd_cache_mutex there - see that function) -
+  // take the same mutex here for the whole rebuild, same reasoning as the
+  // pChdInfo teardown+rebuild above.
+  pthread_mutex_lock(&g_chd_cache_mutex);
+
   disc.session_num = 1;
   disc.session = (session_info_struct *)malloc(sizeof(session_info_struct) * disc.session_num);
   if (disc.session == NULL)
   {
+    pthread_mutex_unlock(&g_chd_cache_mutex);
     YabSetError(YAB_ERR_MEMORYALLOC, NULL);
     return -1;
   }
@@ -2066,6 +2106,7 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   disc.session[0].track = (track_info_struct *)malloc(sizeof(track_info_struct) * disc.session[0].track_num);
   if (disc.session[0].track == NULL)
   {
+    pthread_mutex_unlock(&g_chd_cache_mutex);
     YabSetError(YAB_ERR_MEMORYALLOC, NULL);
     free(disc.session);
     disc.session = NULL;
@@ -2075,7 +2116,6 @@ static int LoadCHD(const char *chd_filename, RFILE *iso_file)
   memcpy(disc.session[0].track, trk, num_tracks * sizeof(track_info_struct));
 
   {
-    pthread_mutex_lock(&g_chd_cache_mutex);
     int i;
     for (i = 0; i < CHD_HUNK_CACHE_SLOTS; i++) {
       pChdInfo->hunk_cache_buf[i] = (char *)malloc(pChdInfo->header->hunkbytes);
